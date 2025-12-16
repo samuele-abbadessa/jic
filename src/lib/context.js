@@ -12,6 +12,11 @@ import { output } from '../utils/output.js';
  * Create an execution context
  */
 export function createContext(config, options = {}) {
+  // Set environment variable for verbose mode so error handling can access it
+  if (options.verbose) {
+    process.env.JIC_VERBOSE = 'true';
+  }
+
   const ctx = {
     // Configuration
     config,
@@ -104,7 +109,8 @@ function getAwsConfigForEnv(config, env) {
     profile: envConfig.profile || awsConfig.profile,
     accountId: envConfig.accountId,
     ecsCluster: envConfig.ecsCluster,
-    ecrRegistry: envConfig.ecrRegistry
+    ecrRegistry: envConfig.ecrRegistry,
+    logGroup: envConfig.logGroup || `jic-${env}-logs`
   };
 }
 

@@ -12,7 +12,7 @@
  */
 
 import { withErrorHandling, BuildError } from '../utils/error.js';
-import { execInModule, execWithSpinner } from '../utils/shell.js';
+import { exec, execInModule, execWithSpinner } from '../utils/shell.js';
 import { output, createSpinner, formatDuration } from '../utils/output.js';
 import { getModulesByType } from '../lib/config.js';
 
@@ -83,19 +83,22 @@ export function registerBuildCommands(program, ctx) {
     .command('frontend')
     .description('Build Angular frontend')
     .option('--prod', 'Production build')
-    .option('--clean', 'Clean cache before build')
+    .option('--no-clean', 'Skip cleaning cache before build')
     .action(withErrorHandling(async (options) => {
       await buildFrontend(ctx, options);
     }));
 
-  // Build specific service with dependencies
+  // Build specific service(s) with dependencies
   build
-    .command('service <name>')
-    .description('Build a service with its dependencies')
+    .command('service <name> [moreNames...]')
+    .description('Build service(s) with their dependencies')
     .option('--skip-tests', 'Skip test execution')
     .option('--docker', 'Also build Docker image')
-    .action(withErrorHandling(async (name, options) => {
-      await buildService(ctx, name, options);
+    .action(withErrorHandling(async (name, moreNames, options) => {
+      const names = [name, ...moreNames];
+      for (const n of names) {
+        await buildService(ctx, n, options);
+      }
     }));
 }
 
@@ -232,10 +235,19 @@ async function buildModule(ctx, module, options) {
       }
     }
 
+    // Show command in verbose mode
+    if (ctx.verbose) {
+      output.info(`${module.name}: ${command}`);
+    }
+
     // Run pre-build command if configured
     if (buildConfig.preBuild) {
+      if (ctx.verbose) {
+        output.info(`${module.name} pre-build: ${buildConfig.preBuild}`);
+      }
       await execInModule(module, buildConfig.preBuild, {
-        silent: true,
+        silent: !ctx.verbose,
+        verbose: ctx.verbose,
         dryRun: ctx.dryRun,
         env: buildConfig.env
       });
@@ -248,7 +260,8 @@ async function buildModule(ctx, module, options) {
 
     const startTime = Date.now();
     await execInModule(module, command, {
-      silent: true,
+      silent: !ctx.verbose,
+      verbose: ctx.verbose,
       env: buildConfig.env
     });
     const duration = Date.now() - startTime;
@@ -258,12 +271,28 @@ async function buildModule(ctx, module, options) {
   } catch (error) {
     spinner.fail(`${module.name}: Build failed`);
 
+    // Always show error details
+    if (error.stderr) {
+      output.error(`\n${error.stderr}`);
+    } else if (error.message) {
+      output.error(`\n${error.message}`);
+    }
+
+    // Show additional info in verbose mode
     if (ctx.verbose) {
-      output.error(error.stderr || error.message);
+      if (error.stdout) {
+        output.info('\nBuild output:');
+        console.log(error.stdout);
+      }
+      if (error.command) {
+        output.info(`\nFailed command: ${error.command}`);
+      }
     }
 
     if (ctx.failStrategy === 'fail-fast') {
-      throw new BuildError(`Build failed for ${module.name}`, module.name);
+      const buildError = new BuildError(`Build failed for ${module.name}`, module.name);
+      buildError.cause = error;
+      throw buildError;
     }
 
     return false;
@@ -323,18 +352,16 @@ async function buildJava(ctx, serviceRefs, options) {
   let failed = 0;
 
   const buildFn = async (module) => {
-    // Modify command to include docker if requested
-    const moduleWithDocker = options.docker ? {
+    // Use dockerCommand if --docker is requested and it's available
+    const moduleForBuild = options.docker && module.build?.dockerCommand ? {
       ...module,
       build: {
         ...module.build,
-        command: module.build?.command?.includes('jib:dockerBuild')
-          ? module.build.command
-          : `${module.build?.command || 'mvn clean install'} jib:dockerBuild`
+        command: module.build.dockerCommand
       }
     } : module;
 
-    return buildModule(ctx, moduleWithDocker, options);
+    return buildModule(ctx, moduleForBuild, options);
   };
 
   if (options.parallel) {
@@ -359,6 +386,13 @@ async function buildJava(ctx, serviceRefs, options) {
 async function buildDocker(ctx, serviceRefs, options) {
   output.header('Building Docker Images');
 
+  // Check Docker daemon is running
+  try {
+    await exec('docker info', { silent: true, timeout: 5000 });
+  } catch (error) {
+    throw new BuildError('Docker daemon is not running. Please start Docker and try again.');
+  }
+
   let modules;
   if (serviceRefs && serviceRefs.length > 0) {
     modules = ctx.resolveModules(serviceRefs);
@@ -377,7 +411,8 @@ async function buildDocker(ctx, serviceRefs, options) {
         continue;
       }
 
-      const command = 'mvn jib:dockerBuild -DskipTests=true -Dmaven.test.skip=true';
+      // Use dockerCommand from config if available, otherwise fallback
+      const command = module.build?.dockerCommand || 'mvn jib:dockerBuild -DskipTests=true -Dmaven.test.skip=true';
 
       if (ctx.dryRun) {
         spinner.info(`${module.name}: [dry-run] ${command}`);
@@ -420,6 +455,7 @@ async function buildNode(ctx, serviceRefs, options) {
 
 /**
  * Build Angular frontend
+ * Always cleans cache before building (like original deploy scripts)
  */
 async function buildFrontend(ctx, options) {
   output.header('Building Frontend');
@@ -433,14 +469,14 @@ async function buildFrontend(ctx, options) {
 
   const module = modules[0];
 
-  // Clean cache if requested
-  if (options.clean) {
-    const spinner = createSpinner('Cleaning cache');
+  // Always clean cache before building (unless --no-clean is passed)
+  if (options.clean !== false) {
+    const spinner = createSpinner('Cleaning build cache');
     spinner.start();
 
     try {
-      await execInModule(module, 'rm -rf node_modules/.cache .angular/cache', { silent: true });
-      spinner.succeed('Cache cleaned');
+      await execInModule(module, 'rm -rf node_modules/.cache .angular/cache target/angular target/classes/static', { silent: true });
+      spinner.succeed('Build cache cleaned');
     } catch {
       spinner.warn('Could not clean cache');
     }
@@ -484,7 +520,9 @@ async function buildService(ctx, name, options) {
     spinner.start();
 
     try {
-      await execInModule(module, 'mvn jib:dockerBuild -DskipTests=true', { silent: true });
+      // Use dockerCommand from config if available, otherwise fallback
+      const dockerCommand = module.build?.dockerCommand || 'mvn jib:dockerBuild -DskipTests=true';
+      await execInModule(module, dockerCommand, { silent: true });
       spinner.succeed(`Docker image: ${module.build.dockerImage}`);
     } catch (error) {
       spinner.fail('Docker build failed');

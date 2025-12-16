@@ -23,6 +23,7 @@ import { registerAwsCommands } from '../src/commands/aws.js';
 import { registerSessionCommands } from '../src/commands/session.js';
 import { registerConfigCommands } from '../src/commands/config.js';
 import { registerStatusCommands } from '../src/commands/status.js';
+import { registerServeCommands } from '../src/commands/serve.js';
 
 // Import core
 import { loadConfig } from '../src/lib/config.js';
@@ -47,8 +48,26 @@ async function main() {
     // Load configuration
     const config = await loadConfig(program.opts());
 
-    // Create execution context
+    // Create execution context (options not yet parsed, will be updated in preAction)
     const ctx = createContext(config, program.opts());
+
+    // Hook to update context with parsed options before any command runs
+    program.hook('preAction', (thisCommand, actionCommand) => {
+      const opts = program.opts();
+
+      // Update context with parsed options
+      ctx.verbose = opts.verbose || false;
+      ctx.dryRun = opts.dryRun || false;
+      ctx.quiet = opts.quiet || false;
+      ctx.json = opts.json || false;
+      ctx.yes = opts.yes || false;
+      ctx.env = opts.env || ctx.env;
+
+      // Set environment variable for verbose mode (used by error handler)
+      if (opts.verbose) {
+        process.env.JIC_VERBOSE = 'true';
+      }
+    });
 
     // Register command groups
     registerGitCommands(program, ctx);
@@ -58,6 +77,7 @@ async function main() {
     registerSessionCommands(program, ctx);
     registerConfigCommands(program, ctx);
     registerStatusCommands(program, ctx);
+    registerServeCommands(program, ctx);
 
     // Parse arguments
     await program.parseAsync(process.argv);

@@ -18,7 +18,7 @@ export async function exec(command, options = {}) {
   const {
     cwd = process.cwd(),
     env = {},
-    stdin,
+    stdin = 'inherit',  // Default to 'inherit' to allow interactive prompts (passwords, MFA, etc.)
     silent = false,
     dryRun = false,
     verbose = false,

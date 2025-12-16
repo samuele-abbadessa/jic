@@ -22,19 +22,21 @@ const STATE_FILENAME = 'jic.state.json';
  */
 async function findProjectRoot(startDir = process.cwd()) {
   let currentDir = startDir;
-  const root = dirname(currentDir);
 
-  while (currentDir !== root) {
+  while (true) {
     const configPath = join(currentDir, CONFIG_FILENAME);
     try {
       await access(configPath, constants.R_OK);
       return currentDir;
     } catch {
-      currentDir = dirname(currentDir);
+      const parentDir = dirname(currentDir);
+      // Stop at filesystem root
+      if (parentDir === currentDir) {
+        return null;
+      }
+      currentDir = parentDir;
     }
   }
-
-  return null;
 }
 
 /**
@@ -152,6 +154,37 @@ export async function saveState(config) {
 }
 
 /**
+ * Save main config to file
+ * Note: This modifies jic.config.json which is version controlled
+ */
+export async function saveConfig(config) {
+  if (!config.isInitialized) {
+    throw new Error('Cannot save config: project not initialized');
+  }
+
+  // Create a clean copy without runtime properties
+  const cleanConfig = {
+    $schema: config.$schema,
+    version: config.version,
+    project: config.project,
+    modules: {},
+    groups: config.groups,
+    buildOrder: config.buildOrder,
+    aws: config.aws,
+    docker: config.docker,
+    defaults: config.defaults
+  };
+
+  // Clean modules (remove runtime properties like name, absolutePath)
+  for (const [name, module] of Object.entries(config.modules || {})) {
+    const { name: _, absolutePath, ...cleanModule } = module;
+    cleanConfig.modules[name] = cleanModule;
+  }
+
+  await saveJsonFile(config.paths.config, cleanConfig);
+}
+
+/**
  * Get a module by name or alias
  */
 export function getModule(config, nameOrAlias) {
@@ -244,10 +277,30 @@ export function getModulesByType(config, type) {
 
 /**
  * Get the next deploy version for a module
+ * Supports both integer versions (1, 2, 3) and decimal versions (3.01, 3.02)
+ * Decimal versions increment by 0.01
  */
 export function getNextDeployVersion(config, moduleName, env = 'dev') {
-  const current = config.state.deployVersions?.[env]?.[moduleName]?.version || 0;
-  return current + 1;
+  const current = config.state.deployVersions?.[env]?.[moduleName]?.version;
+
+  if (current === undefined || current === null) {
+    return '1.00';
+  }
+
+  // Parse as float to handle both "3.01" strings and numeric values
+  const currentNum = parseFloat(current);
+
+  // Check if it's a decimal version (has decimal places or is a string with decimals)
+  const isDecimal = String(current).includes('.') || (currentNum % 1 !== 0);
+
+  if (isDecimal) {
+    // Increment by 0.01 and fix floating point precision
+    const next = (currentNum + 0.01).toFixed(2);
+    return next;
+  } else {
+    // Legacy integer versioning - still increment by 1
+    return currentNum + 1;
+  }
 }
 
 /**
@@ -271,6 +324,7 @@ export function updateDeployVersion(config, moduleName, env, version, commit) {
 export default {
   loadConfig,
   saveState,
+  saveConfig,
   getModule,
   resolveModules,
   getModulesByType,

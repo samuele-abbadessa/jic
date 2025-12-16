@@ -14,9 +14,11 @@
  *   jic aws cf invalidate - Invalidate CloudFront
  */
 
+import inquirer from 'inquirer';
 import { withErrorHandling, AwsError } from '../utils/error.js';
 import { exec, execWithSpinner } from '../utils/shell.js';
 import { output, createSpinner } from '../utils/output.js';
+import { saveConfig } from '../lib/config.js';
 
 /**
  * Register AWS commands
@@ -135,6 +137,37 @@ export function registerAwsCommands(program, ctx) {
       await lambdaInvoke(ctx, func, options);
     }));
 
+  lambda
+    .command('create <function>')
+    .description('Create a new Lambda function')
+    .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
+    .option('--runtime <runtime>', 'Runtime (e.g., nodejs18.x, python3.11)')
+    .option('--handler <handler>', 'Handler (e.g., index.handler)')
+    .option('--role <arn>', 'IAM role ARN')
+    .option('--timeout <seconds>', 'Timeout in seconds')
+    .option('--memory <mb>', 'Memory size in MB')
+    .action(withErrorHandling(async (func, options) => {
+      await lambdaCreate(ctx, func, options);
+    }));
+
+  lambda
+    .command('exists <function>')
+    .description('Check if Lambda function exists')
+    .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
+    .action(withErrorHandling(async (func, options) => {
+      await lambdaCheckExists(ctx, func, options);
+    }));
+
+  lambda
+    .command('init-all')
+    .description('Fetch Lambda configurations from AWS and update jic.config.json')
+    .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .option('--show-only', 'Only show what would be changed, do not apply')
+    .action(withErrorHandling(async (options) => {
+      await lambdaInitAll(ctx, options);
+    }));
+
   // CloudFront subcommands
   const cf = aws
     .command('cf')
@@ -156,6 +189,45 @@ export function registerAwsCommands(program, ctx) {
  */
 function getProfileFlag(awsConfig) {
   return awsConfig.profile ? `--profile ${awsConfig.profile}` : '';
+}
+
+/**
+ * Check if a Lambda function exists
+ * @param {string} functionName - Function name
+ * @param {string} region - AWS region
+ * @param {string} profile - AWS profile (optional)
+ * @returns {Promise<boolean>} - True if function exists
+ */
+export async function lambdaFunctionExists(functionName, region, profile = '') {
+  try {
+    const profileFlag = profile ? `--profile ${profile}` : '';
+    await exec(
+      `aws lambda get-function --function-name ${functionName} --region ${region} ${profileFlag}`,
+      { silent: true }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get Lambda function configuration from module config
+ */
+function getLambdaFunctionConfig(module, functionName) {
+  const defaults = module.lambdaDefaults || {
+    runtime: 'nodejs18.x',
+    handler: 'index.handler',
+    timeout: 30,
+    memorySize: 256
+  };
+
+  const functionConfig = module.functionConfig?.[functionName] || {};
+
+  return {
+    ...defaults,
+    ...functionConfig
+  };
 }
 
 /**
@@ -290,17 +362,24 @@ async function ecsLogs(ctx, service, options) {
 
   output.header(`Logs: ${serviceName}`);
 
-  // Get log group name (assuming standard naming)
-  const logGroup = `/ecs/${serviceName}`;
+  // Get log group and stream prefix from config
+  // Default pattern: log group "jic-dev-logs" with stream prefix "gws-dev/"
+  const logGroup = awsConfig.logGroup || `jic-${env}-logs`;
+  // Stream prefix is the service name without "-service" suffix (e.g., "gws-dev" from "gws-dev-service")
+  const streamPrefix = serviceName.replace(/-service$/, '');
+
+  output.keyValue('Log Group', logGroup);
+  output.keyValue('Stream Prefix', streamPrefix);
+  output.newline();
 
   try {
     const followFlag = options.follow ? '--follow' : '';
-    const cmd = `aws logs tail ${logGroup} --since 1h ${followFlag} --region ${awsConfig.region} ${profile}`;
+    const streamFilter = `--log-stream-name-prefix ${streamPrefix}/`;
 
     if (options.follow) {
       // Stream logs
       const { spawn } = await import('child_process');
-      const args = ['logs', 'tail', logGroup, '--since', '1h', '--follow', '--region', awsConfig.region];
+      const args = ['logs', 'tail', logGroup, '--since', '1h', '--follow', '--log-stream-name-prefix', `${streamPrefix}/`, '--region', awsConfig.region];
       if (awsConfig.profile) {
         args.push('--profile', awsConfig.profile);
       }
@@ -311,6 +390,7 @@ async function ecsLogs(ctx, service, options) {
         output.error(`Failed to stream logs: ${error.message}`);
       });
     } else {
+      const cmd = `aws logs tail ${logGroup} --since 1h ${streamFilter} --region ${awsConfig.region} ${profile}`;
       const result = await exec(cmd, { silent: true });
       console.log(result.stdout);
     }
@@ -646,6 +726,321 @@ async function lambdaInvoke(ctx, func, options) {
   } catch (error) {
     spinner.fail('Invocation failed');
     throw new AwsError(error.message, 'Lambda');
+  }
+}
+
+/**
+ * Create a new Lambda function
+ */
+async function lambdaCreate(ctx, functionName, options) {
+  const env = options.env || ctx.env;
+  const awsConfig = ctx.getAwsConfig(env);
+  const profile = getProfileFlag(awsConfig);
+
+  // Get Lambda module for config
+  const module = ctx.getModule('aws-lambda-functions');
+  if (!module) {
+    throw new AwsError('Lambda functions module not found');
+  }
+
+  const deployConfig = module.deploy?.[env];
+  if (!deployConfig?.role) {
+    throw new AwsError(`No IAM role configured for Lambda in ${env} environment. Add 'role' to deploy.${env} in jic.config.json`);
+  }
+
+  // Get function config (from module config or CLI options)
+  const funcConfig = getLambdaFunctionConfig(module, functionName);
+  const runtime = options.runtime || funcConfig.runtime;
+  const handler = options.handler || funcConfig.handler;
+  const timeout = options.timeout || funcConfig.timeout;
+  const memorySize = options.memory || funcConfig.memorySize;
+  const role = options.role || deployConfig.role;
+
+  output.header(`Create Lambda: ${functionName}`);
+  output.keyValue('Environment', env);
+  output.keyValue('Runtime', runtime);
+  output.keyValue('Handler', handler);
+  output.keyValue('Timeout', `${timeout}s`);
+  output.keyValue('Memory', `${memorySize} MB`);
+  output.keyValue('Role', role);
+  output.newline();
+
+  // Check if function already exists
+  const exists = await lambdaFunctionExists(functionName, awsConfig.region, awsConfig.profile);
+  if (exists) {
+    output.warning(`Function '${functionName}' already exists in ${env}`);
+    return;
+  }
+
+  const spinner = createSpinner('Creating Lambda function');
+  spinner.start();
+
+  try {
+    if (ctx.dryRun) {
+      spinner.info(`[dry-run] Would create ${functionName}`);
+      return;
+    }
+
+    // Create a minimal deployment package (placeholder)
+    const functionPath = `${module.absolutePath}/${functionName}`;
+    const zipFile = `${module.absolutePath}/create-${functionName}.zip`;
+
+    // Check if function directory exists
+    const dirExists = await exec(`test -d ${functionPath} && echo "yes" || echo "no"`, { silent: true });
+
+    if (dirExists.stdout.trim() === 'yes') {
+      // Install dependencies if package.json exists
+      await exec(`cd ${functionPath} && [ -f package.json ] && npm install --production || true`, { silent: true });
+      // Create zip from existing code
+      await exec(`cd ${functionPath} && zip -r ${zipFile} .`, { silent: true });
+    } else {
+      // Create minimal placeholder
+      await exec(`mkdir -p ${functionPath}`, { silent: true });
+      await exec(`echo "exports.handler = async (event) => { return { statusCode: 200, body: 'Hello from ${functionName}' }; };" > ${functionPath}/index.js`, { silent: true });
+      await exec(`cd ${functionPath} && zip -r ${zipFile} .`, { silent: true });
+    }
+
+    // Create the Lambda function
+    await exec(
+      `aws lambda create-function \
+        --function-name ${functionName} \
+        --runtime ${runtime} \
+        --handler ${handler} \
+        --role ${role} \
+        --timeout ${timeout} \
+        --memory-size ${memorySize} \
+        --zip-file fileb://${zipFile} \
+        --region ${awsConfig.region} ${profile}`,
+      { silent: true }
+    );
+
+    // Clean up zip file
+    await exec(`rm -f ${zipFile}`, { silent: true });
+
+    spinner.succeed(`Created ${functionName}`);
+
+    // Add to functions list if not already there
+    if (!module.functions.includes(functionName)) {
+      output.info(`Remember to add '${functionName}' to the functions list in jic.config.json`);
+    }
+  } catch (error) {
+    spinner.fail('Creation failed');
+    const awsError = new AwsError(`Failed to create Lambda function: ${error.message}`, 'Lambda');
+    awsError.cause = error;
+    throw awsError;
+  }
+}
+
+/**
+ * Check if Lambda function exists
+ */
+async function lambdaCheckExists(ctx, functionName, options) {
+  const env = options.env || ctx.env;
+  const awsConfig = ctx.getAwsConfig(env);
+  const profile = getProfileFlag(awsConfig);
+
+  output.header(`Check Lambda: ${functionName}`);
+
+  const spinner = createSpinner('Checking function');
+  spinner.start();
+
+  try {
+    const result = await exec(
+      `aws lambda get-function --function-name ${functionName} --region ${awsConfig.region} ${profile}`,
+      { silent: true }
+    );
+
+    const data = JSON.parse(result.stdout);
+    const config = data.Configuration;
+    spinner.stop();
+
+    output.success(`Function '${functionName}' exists`);
+    output.newline();
+    output.keyValue('Runtime', config.Runtime);
+    output.keyValue('Handler', config.Handler);
+    output.keyValue('Timeout', `${config.Timeout}s`);
+    output.keyValue('Memory', `${config.MemorySize} MB`);
+    output.keyValue('Last Modified', new Date(config.LastModified).toLocaleString());
+    output.keyValue('Code Size', `${(config.CodeSize / 1024).toFixed(1)} KB`);
+    output.keyValue('State', config.State);
+  } catch (error) {
+    spinner.stop();
+    output.error(`Function '${functionName}' does not exist in ${env}`);
+  }
+}
+
+/**
+ * Fetch Lambda configurations from AWS and update jic.config.json
+ */
+async function lambdaInitAll(ctx, options) {
+  const env = options.env || ctx.env;
+  const awsConfig = ctx.getAwsConfig(env);
+  const profile = getProfileFlag(awsConfig);
+
+  output.header(`Initialize Lambda Config from AWS (${env})`);
+
+  const spinner = createSpinner('Fetching functions from AWS');
+  spinner.start();
+
+  try {
+    const result = await exec(
+      `aws lambda list-functions --region ${awsConfig.region} ${profile}`,
+      { silent: true }
+    );
+
+    const data = JSON.parse(result.stdout);
+    spinner.stop();
+
+    if (data.Functions.length === 0) {
+      output.info('No Lambda functions found in AWS');
+      return;
+    }
+
+    output.info(`Found ${data.Functions.length} function(s) in AWS`);
+    output.newline();
+
+    // Get Lambda module
+    const module = ctx.getModule('aws-lambda-functions');
+    if (!module) {
+      throw new AwsError('Lambda functions module not found in jic.config.json');
+    }
+
+    // Find most common runtime for defaults
+    const runtimeCounts = {};
+    data.Functions.forEach(f => {
+      if (f.Runtime) {
+        runtimeCounts[f.Runtime] = (runtimeCounts[f.Runtime] || 0) + 1;
+      }
+    });
+    const mostCommonRuntime = Object.entries(runtimeCounts)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || 'nodejs18.x';
+
+    // Find most common handler pattern
+    const handlerCounts = {};
+    data.Functions.forEach(f => {
+      if (f.Handler) {
+        handlerCounts[f.Handler] = (handlerCounts[f.Handler] || 0) + 1;
+      }
+    });
+    const mostCommonHandler = Object.entries(handlerCounts)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || 'index.handler';
+
+    // Build new config values
+    const newDefaults = {
+      runtime: mostCommonRuntime,
+      handler: mostCommonHandler,
+      timeout: 30,
+      memorySize: 256
+    };
+
+    const newFunctions = data.Functions.map(f => f.FunctionName).sort();
+
+    const newFunctionConfig = {};
+    for (const func of data.Functions) {
+      const needsCustomConfig =
+        func.Runtime !== mostCommonRuntime ||
+        func.Handler !== mostCommonHandler ||
+        func.Timeout !== 30 ||
+        func.MemorySize !== 256;
+
+      if (needsCustomConfig) {
+        newFunctionConfig[func.FunctionName] = {};
+        if (func.Runtime !== mostCommonRuntime) {
+          newFunctionConfig[func.FunctionName].runtime = func.Runtime;
+        }
+        if (func.Handler !== mostCommonHandler) {
+          newFunctionConfig[func.FunctionName].handler = func.Handler;
+        }
+        if (func.Timeout !== 30) {
+          newFunctionConfig[func.FunctionName].timeout = func.Timeout;
+        }
+        if (func.MemorySize !== 256) {
+          newFunctionConfig[func.FunctionName].memorySize = func.MemorySize;
+        }
+      }
+    }
+
+    // Show what will be changed
+    output.subheader('Changes to apply:');
+    output.newline();
+
+    output.info('lambdaDefaults:');
+    console.log(JSON.stringify(newDefaults, null, 2));
+    output.newline();
+
+    output.info(`functions: [${newFunctions.length} functions]`);
+    console.log(JSON.stringify(newFunctions, null, 2));
+    output.newline();
+
+    if (Object.keys(newFunctionConfig).length > 0) {
+      output.info(`functionConfig: [${Object.keys(newFunctionConfig).length} custom configs]`);
+      console.log(JSON.stringify(newFunctionConfig, null, 2));
+      output.newline();
+    }
+
+    // Show table of all functions
+    output.subheader('Function Details:');
+    const rows = data.Functions.map(f => [
+      output.module(f.FunctionName),
+      f.Runtime || 'N/A',
+      f.Handler || 'N/A',
+      `${f.Timeout}s`,
+      `${f.MemorySize} MB`
+    ]);
+
+    output.table(rows, {
+      head: ['Function', 'Runtime', 'Handler', 'Timeout', 'Memory']
+    });
+    output.newline();
+
+    // Show only mode - don't apply
+    if (options.showOnly) {
+      output.info('--show-only mode: changes not applied');
+      return;
+    }
+
+    // Dry run mode
+    if (ctx.dryRun) {
+      output.info('[dry-run] Would update jic.config.json');
+      return;
+    }
+
+    // Confirm before applying
+    if (!options.yes) {
+      const { confirm } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirm',
+        message: 'Apply these changes to jic.config.json?',
+        default: true
+      }]);
+
+      if (!confirm) {
+        output.info('Aborted');
+        return;
+      }
+    }
+
+    // Apply changes to config
+    const saveSpinner = createSpinner('Updating jic.config.json');
+    saveSpinner.start();
+
+    // Update the module in config
+    module.lambdaDefaults = newDefaults;
+    module.functions = newFunctions;
+    module.functionConfig = Object.keys(newFunctionConfig).length > 0 ? newFunctionConfig : undefined;
+
+    // Save config
+    await saveConfig(ctx.config);
+
+    saveSpinner.succeed('Updated jic.config.json');
+    output.newline();
+    output.success(`Synced ${newFunctions.length} Lambda function(s) from AWS`);
+
+  } catch (error) {
+    if (error instanceof AwsError) throw error;
+    const awsError = new AwsError(error.message, 'Lambda');
+    awsError.cause = error;
+    throw awsError;
   }
 }
 

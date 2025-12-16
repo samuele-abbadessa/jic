@@ -55,10 +55,27 @@ export class GitError extends JicError {
   }
 }
 
+export class ServeError extends JicError {
+  constructor(message, service = null) {
+    super(message, 7);
+    this.name = 'ServeError';
+    this.service = service;
+  }
+}
+
+/**
+ * Check if verbose mode is enabled
+ */
+function isVerbose() {
+  return process.env.JIC_VERBOSE === 'true';
+}
+
 /**
  * Handle and format errors for output
  */
 export function handleError(error) {
+  const verbose = isVerbose();
+
   // Custom JIC errors
   if (error instanceof JicError) {
     console.error(`\n${logSymbols.error} ${chalk.red(error.message)}`);
@@ -71,7 +88,17 @@ export function handleError(error) {
       console.error(chalk.gray(`   Service: ${error.service}`));
     }
 
-    if (process.env.JIC_VERBOSE === 'true' && error.stack) {
+    // Show cause/original error if available
+    if (verbose && error.cause) {
+      console.error(chalk.gray('\nCaused by:'));
+      console.error(chalk.gray(`   ${error.cause.message || error.cause}`));
+      if (error.cause.stderr) {
+        console.error(chalk.yellow('\nError output:'));
+        console.error(error.cause.stderr);
+      }
+    }
+
+    if (verbose && error.stack) {
       console.error(chalk.gray('\nStack trace:'));
       console.error(chalk.gray(error.stack));
     }
@@ -84,14 +111,29 @@ export function handleError(error) {
     console.error(`\n${logSymbols.error} ${chalk.red('Command failed:')}`);
     console.error(chalk.gray(`   ${error.command}`));
 
+    if (error.exitCode !== undefined) {
+      console.error(chalk.gray(`   Exit code: ${error.exitCode}`));
+    }
+
     if (error.stderr) {
-      console.error(chalk.red('\nError output:'));
+      console.error(chalk.yellow('\nError output:'));
       console.error(error.stderr);
     }
 
-    if (error.stdout && process.env.JIC_VERBOSE === 'true') {
-      console.error(chalk.gray('\nStandard output:'));
-      console.error(error.stdout);
+    if (verbose) {
+      if (error.stdout) {
+        console.error(chalk.gray('\nStandard output:'));
+        console.error(error.stdout);
+      }
+
+      if (error.cwd) {
+        console.error(chalk.gray(`\nWorking directory: ${error.cwd}`));
+      }
+
+      if (error.stack) {
+        console.error(chalk.gray('\nStack trace:'));
+        console.error(chalk.gray(error.stack));
+      }
     }
 
     return;
@@ -100,9 +142,16 @@ export function handleError(error) {
   // Generic errors
   console.error(`\n${logSymbols.error} ${chalk.red(error.message || error)}`);
 
-  if (process.env.JIC_VERBOSE === 'true' && error.stack) {
-    console.error(chalk.gray('\nStack trace:'));
-    console.error(chalk.gray(error.stack));
+  if (verbose) {
+    if (error.cause) {
+      console.error(chalk.gray('\nCaused by:'));
+      console.error(chalk.gray(`   ${error.cause.message || error.cause}`));
+    }
+
+    if (error.stack) {
+      console.error(chalk.gray('\nStack trace:'));
+      console.error(chalk.gray(error.stack));
+    }
   }
 }
 
@@ -136,6 +185,7 @@ export default {
   DeployError,
   AwsError,
   GitError,
+  ServeError,
   handleError,
   withErrorHandling,
   assert

@@ -9,9 +9,10 @@
  */
 
 import { withErrorHandling, DeployError } from '../utils/error.js';
-import { exec, execWithSpinner, getGitCommit } from '../utils/shell.js';
+import { exec, execWithSpinner, getGitCommit, execInModule } from '../utils/shell.js';
 import { output, createSpinner, formatDuration } from '../utils/output.js';
-import { getModulesByType, getNextDeployVersion, updateDeployVersion, saveState } from '../lib/config.js';
+import { getModulesByType, getNextDeployVersion, updateDeployVersion, saveState, getModule } from '../lib/config.js';
+import { lambdaFunctionExists } from './aws.js';
 
 /**
  * Register deploy commands
@@ -21,16 +22,26 @@ export function registerDeployCommands(program, ctx) {
     .command('deploy')
     .description('Deployment operations');
 
-  // Deploy backend service
+  // Deploy backend service(s)
   deploy
-    .command('backend <service>')
-    .description('Deploy a backend service to ECS')
+    .command('backend <service> [moreServices...]')
+    .description('Deploy backend service(s) to ECS')
     .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
     .option('-v, --version <n>', 'Version number (auto-incremented if not specified)')
     .option('--no-build', 'Skip building before deploy')
+    .option('--with-deps', 'Rebuild dependencies (flux clients) before deploy')
     .option('--wait', 'Wait for deployment to complete')
-    .action(withErrorHandling(async (service, options) => {
-      await deployBackend(ctx, service, options);
+    .action(withErrorHandling(async (service, moreServices, options) => {
+      const services = [service, ...moreServices];
+
+      // Build dependencies if requested
+      if (options.withDeps) {
+        await buildDependencies(ctx, services);
+      }
+
+      for (const svc of services) {
+        await deployBackend(ctx, svc, options);
+      }
     }));
 
   // Deploy all backend services
@@ -40,7 +51,13 @@ export function registerDeployCommands(program, ctx) {
     .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
     .option('-v, --version <n>', 'Base version number')
     .option('--no-build', 'Skip building before deploy')
+    .option('--with-deps', 'Rebuild dependencies (flux clients) before deploy')
     .action(withErrorHandling(async (options) => {
+      // Build all flux clients if --with-deps
+      if (options.withDeps) {
+        await buildAllFluxClients(ctx);
+      }
+
       await deployBackendAll(ctx, options);
     }));
 
@@ -51,17 +68,37 @@ export function registerDeployCommands(program, ctx) {
     .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
     .option('--no-build', 'Skip building before deploy')
     .option('--no-invalidate', 'Skip CloudFront invalidation')
+    .option('--with-deps', 'Rebuild backend services before deploy (for API changes)')
     .action(withErrorHandling(async (options) => {
+      if (options.withDeps) {
+        // Frontend might depend on backend API changes - rebuild and deploy backend first
+        output.subheader('Building backend dependencies');
+        await buildAllFluxClients(ctx);
+      }
       await deployFrontend(ctx, options);
     }));
 
-  // Deploy Lambda function
+  // Deploy Lambda function(s)
   deploy
-    .command('lambda <function>')
-    .description('Deploy a Lambda function')
+    .command('lambda <function> [moreFunctions...]')
+    .description('Deploy one or more Lambda functions')
     .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
-    .action(withErrorHandling(async (func, options) => {
-      await deployLambda(ctx, func, options);
+    .option('--with-deps', 'Rebuild and deploy Lambda layer before functions (only once)')
+    .option('--create', 'Create function if it does not exist')
+    .action(withErrorHandling(async (func, moreFunctions, options) => {
+      const functions = [func, ...moreFunctions];
+
+      // Build layer only once for all functions
+      if (options.withDeps) {
+        output.subheader('Deploying Lambda layer dependency');
+        await deployLambdaLayer(ctx, options);
+        output.newline();
+      }
+
+      // Deploy all specified functions
+      for (const f of functions) {
+        await deployLambda(ctx, f, options);
+      }
     }));
 
   // Deploy all Lambda functions
@@ -69,7 +106,14 @@ export function registerDeployCommands(program, ctx) {
     .command('lambda-all')
     .description('Deploy all Lambda functions')
     .option('-e, --env <env>', 'Environment (dev/prod)', 'dev')
+    .option('--with-deps', 'Rebuild and deploy Lambda layer before functions (only once)')
     .action(withErrorHandling(async (options) => {
+      // Build layer only once for all functions
+      if (options.withDeps) {
+        output.subheader('Deploying Lambda layer dependency');
+        await deployLambdaLayer(ctx, options);
+        output.newline();
+      }
       await deployLambdaAll(ctx, options);
     }));
 
@@ -139,24 +183,34 @@ async function deployBackend(ctx, serviceName, options) {
   const remoteImage = `${deployConfig.ecrRegistry}/${deployConfig.ecrRepo}`;
   const profile = deployConfig.profile ? `--profile ${deployConfig.profile}` : '';
 
+  // Check Docker daemon is running
+  try {
+    await exec('docker info', { silent: true, timeout: 5000 });
+  } catch (error) {
+    throw new DeployError('Docker daemon is not running. Please start Docker and try again.');
+  }
+
   // Build if needed
   if (options.build !== false) {
     const buildSpinner = createSpinner('Building Docker image');
     buildSpinner.start();
 
     try {
+      // Use dockerCommand from config if available, otherwise fallback
+      const dockerBuildCmd = module.build?.dockerCommand ||
+        'mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true';
+
       if (ctx.dryRun) {
         buildSpinner.info('[dry-run] Would build Docker image');
       } else {
-        await exec(
-          `mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true`,
-          { cwd: module.absolutePath, silent: true }
-        );
+        await exec(dockerBuildCmd, { cwd: module.absolutePath, silent: true });
         buildSpinner.succeed('Docker image built');
       }
     } catch (error) {
       buildSpinner.fail('Build failed');
-      throw new DeployError('Build failed', module.name);
+      const deployError = new DeployError('Build failed', module.name);
+      deployError.cause = error;
+      throw deployError;
     }
   }
 
@@ -176,7 +230,9 @@ async function deployBackend(ctx, serviceName, options) {
     }
   } catch (error) {
     loginSpinner.fail('ECR login failed');
-    throw new DeployError('ECR login failed', module.name);
+    const deployError = new DeployError('ECR login failed', module.name);
+    deployError.cause = error;
+    throw deployError;
   }
 
   // Tag and push image
@@ -200,7 +256,9 @@ async function deployBackend(ctx, serviceName, options) {
     }
   } catch (error) {
     pushSpinner.fail('Push failed');
-    throw new DeployError('Push to ECR failed', module.name);
+    const deployError = new DeployError('Push to ECR failed', module.name);
+    deployError.cause = error;
+    throw deployError;
   }
 
   // Update ECS service
@@ -219,7 +277,9 @@ async function deployBackend(ctx, serviceName, options) {
     }
   } catch (error) {
     deploySpinner.fail('ECS update failed');
-    throw new DeployError('ECS update failed', module.name);
+    const deployError = new DeployError('ECS update failed', module.name);
+    deployError.cause = error;
+    throw deployError;
   }
 
   // Wait for deployment if requested
@@ -235,7 +295,9 @@ async function deployBackend(ctx, serviceName, options) {
       waitSpinner.succeed('Deployment stabilized');
     } catch (error) {
       waitSpinner.fail('Deployment did not stabilize');
-      throw new DeployError('Deployment did not stabilize', module.name);
+      const deployError = new DeployError('Deployment did not stabilize', module.name);
+      deployError.cause = error;
+      throw deployError;
     }
   }
 
@@ -321,7 +383,9 @@ async function deployFrontend(ctx, options) {
       }
     } catch (error) {
       buildSpinner.fail('Build failed');
-      throw new DeployError('Frontend build failed');
+      const deployError = new DeployError('Frontend build failed');
+      deployError.cause = error;
+      throw deployError;
     }
   }
 
@@ -341,7 +405,9 @@ async function deployFrontend(ctx, options) {
     }
   } catch (error) {
     syncSpinner.fail('S3 sync failed');
-    throw new DeployError('S3 sync failed');
+    const deployError = new DeployError('S3 sync failed');
+    deployError.cause = error;
+    throw deployError;
   }
 
   // Invalidate CloudFront
@@ -373,7 +439,9 @@ async function deployFrontend(ctx, options) {
       }
     } catch (error) {
       invalidateSpinner.fail('CloudFront invalidation failed');
-      throw new DeployError('CloudFront invalidation failed');
+      const deployError = new DeployError('CloudFront invalidation failed');
+      deployError.cause = error;
+      throw deployError;
     }
   }
 
@@ -382,7 +450,26 @@ async function deployFrontend(ctx, options) {
 }
 
 /**
- * Deploy a Lambda function
+ * Get Lambda function configuration from module config
+ */
+function getLambdaFunctionConfig(module, functionName) {
+  const defaults = module.lambdaDefaults || {
+    runtime: 'nodejs18.x',
+    handler: 'index.handler',
+    timeout: 30,
+    memorySize: 256
+  };
+
+  const functionConfig = module.functionConfig?.[functionName] || {};
+
+  return {
+    ...defaults,
+    ...functionConfig
+  };
+}
+
+/**
+ * Deploy a Lambda function with versioning
  */
 async function deployLambda(ctx, functionName, options) {
   const module = ctx.getModule('aws-lambda-functions');
@@ -393,8 +480,96 @@ async function deployLambda(ctx, functionName, options) {
   const env = options.env || ctx.env;
   const awsConfig = ctx.getAwsConfig(env);
   const profile = awsConfig.profile ? `--profile ${awsConfig.profile}` : '';
+  const deployConfig = module.deploy?.[env];
+
+  // Check if function exists
+  const exists = await lambdaFunctionExists(functionName, awsConfig.region, awsConfig.profile);
+
+  if (!exists) {
+    if (options.create) {
+      // Create the function first
+      output.header(`Creating Lambda: ${functionName} → ${env}`);
+
+      if (!deployConfig?.role) {
+        throw new DeployError(`No IAM role configured for Lambda in ${env} environment. Add 'role' to deploy.${env} in jic.config.json`);
+      }
+
+      const funcConfig = getLambdaFunctionConfig(module, functionName);
+      output.keyValue('Runtime', funcConfig.runtime);
+      output.keyValue('Handler', funcConfig.handler);
+      output.keyValue('Timeout', `${funcConfig.timeout}s`);
+      output.keyValue('Memory', `${funcConfig.memorySize} MB`);
+      output.newline();
+
+      const createSpinnerInst = createSpinner('Creating Lambda function');
+      createSpinnerInst.start();
+
+      try {
+        if (ctx.dryRun) {
+          createSpinnerInst.info(`[dry-run] Would create ${functionName}`);
+        } else {
+          const functionPath = `${module.absolutePath}/${functionName}`;
+          const zipFile = `${module.absolutePath}/create-${functionName}.zip`;
+
+          // Check if function directory exists
+          const dirExists = await exec(`test -d ${functionPath} && echo "yes" || echo "no"`, { silent: true });
+
+          if (dirExists.stdout.trim() === 'yes') {
+            await exec(`cd ${functionPath} && [ -f package.json ] && npm install --production || true`, { silent: true });
+            await exec(`cd ${functionPath} && zip -r ${zipFile} .`, { silent: true });
+          } else {
+            // Create minimal placeholder
+            await exec(`mkdir -p ${functionPath}`, { silent: true });
+            await exec(`echo "exports.handler = async (event) => { return { statusCode: 200, body: 'Hello from ${functionName}' }; };" > ${functionPath}/index.js`, { silent: true });
+            await exec(`cd ${functionPath} && zip -r ${zipFile} .`, { silent: true });
+          }
+
+          // Create the Lambda function
+          await exec(
+            `aws lambda create-function \
+              --function-name ${functionName} \
+              --runtime ${funcConfig.runtime} \
+              --handler ${funcConfig.handler} \
+              --role ${deployConfig.role} \
+              --timeout ${funcConfig.timeout} \
+              --memory-size ${funcConfig.memorySize} \
+              --zip-file fileb://${zipFile} \
+              --region ${awsConfig.region} ${profile}`,
+            { silent: true }
+          );
+
+          await exec(`rm -f ${zipFile}`, { silent: true });
+          createSpinnerInst.succeed(`Created ${functionName}`);
+
+          // Wait for function to be active
+          await exec(
+            `aws lambda wait function-active --function-name ${functionName} --region ${awsConfig.region} ${profile}`,
+            { silent: true, timeout: 60000 }
+          );
+        }
+      } catch (error) {
+        createSpinnerInst.fail('Creation failed');
+        const deployError = new DeployError(`Failed to create Lambda function: ${functionName}`);
+        deployError.cause = error;
+        throw deployError;
+      }
+
+      output.newline();
+    } else {
+      throw new DeployError(
+        `Lambda function '${functionName}' does not exist in ${env}. ` +
+        `Use --create flag to create it, or run: jic aws lambda create ${functionName} -e ${env}`
+      );
+    }
+  }
+
+  // Get next version (use function name as the module identifier for versioning)
+  const versionKey = `lambda:${functionName}`;
+  const version = options.version || getNextDeployVersion(ctx.config, versionKey, env);
 
   output.header(`Deploy Lambda: ${functionName} → ${env}`);
+  output.keyValue('Version', version);
+  output.newline();
 
   const functionPath = `${module.absolutePath}/${functionName}`;
 
@@ -415,7 +590,9 @@ async function deployLambda(ctx, functionName, options) {
     }
   } catch (error) {
     zipSpinner.fail('Failed to create package');
-    throw new DeployError(`Failed to create package for ${functionName}`);
+    const deployError = new DeployError(`Failed to create package for ${functionName}`);
+    deployError.cause = error;
+    throw deployError;
   }
 
   // Deploy to Lambda
@@ -438,11 +615,67 @@ async function deployLambda(ctx, functionName, options) {
     }
   } catch (error) {
     deploySpinner.fail('Lambda update failed');
-    throw new DeployError(`Lambda update failed for ${functionName}`);
+    const deployError = new DeployError(`Lambda update failed for ${functionName}`);
+    deployError.cause = error;
+    throw deployError;
+  }
+
+  // Publish new version
+  const publishSpinner = createSpinner('Publishing Lambda version');
+  publishSpinner.start();
+
+  let publishedVersion = null;
+  try {
+    if (ctx.dryRun) {
+      publishSpinner.info(`[dry-run] Would publish version ${version}`);
+    } else {
+      // Wait for function to be ready after update
+      await exec(
+        `aws lambda wait function-updated --function-name ${functionName} --region ${awsConfig.region} ${profile}`,
+        { silent: true, timeout: 60000 }
+      );
+
+      // Publish version with description
+      const result = await exec(
+        `aws lambda publish-version --function-name ${functionName} --description "v${version}" --region ${awsConfig.region} ${profile}`,
+        { silent: true }
+      );
+
+      const versionInfo = JSON.parse(result.stdout);
+      publishedVersion = versionInfo.Version;
+      publishSpinner.succeed(`Published version ${publishedVersion}`);
+    }
+  } catch (error) {
+    publishSpinner.fail('Failed to publish version');
+    const deployError = new DeployError(`Failed to publish version for ${functionName}`);
+    deployError.cause = error;
+    throw deployError;
+  }
+
+  // Update state
+  if (!ctx.dryRun) {
+    const commit = await getGitCommit(module.absolutePath);
+    updateDeployVersion(ctx.config, versionKey, env, version, commit);
+
+    // Also store the AWS Lambda version number
+    if (!ctx.config.state.lambdaVersions) {
+      ctx.config.state.lambdaVersions = { dev: {}, prod: {} };
+    }
+    if (!ctx.config.state.lambdaVersions[env]) {
+      ctx.config.state.lambdaVersions[env] = {};
+    }
+    ctx.config.state.lambdaVersions[env][functionName] = {
+      version,
+      awsVersion: publishedVersion,
+      deployedAt: new Date().toISOString(),
+      commit
+    };
+
+    await saveState(ctx.config);
   }
 
   output.newline();
-  output.success(`Lambda ${functionName} deployed to ${env}`);
+  output.success(`Lambda ${functionName} v${version} deployed to ${env}`);
 }
 
 /**
@@ -469,7 +702,7 @@ async function deployLambdaAll(ctx, options) {
 }
 
 /**
- * Deploy Lambda layer
+ * Deploy Lambda layer with versioning
  */
 async function deployLambdaLayer(ctx, options) {
   const module = ctx.getModule('aws-lambda-layer');
@@ -482,9 +715,16 @@ async function deployLambdaLayer(ctx, options) {
   const deployConfig = module.deploy?.[env] || module.deploy;
   const profile = awsConfig.profile ? `--profile ${awsConfig.profile}` : '';
 
-  output.header(`Deploy Lambda Layer → ${env}`);
+  // Get next version
+  const versionKey = 'lambda-layer';
+  const version = options.version || getNextDeployVersion(ctx.config, versionKey, env);
 
-  const layerName = deployConfig?.layerName || 'jic-shared-layer';
+  output.header(`Deploy Lambda Layer → ${env}`);
+  output.keyValue('Version', version);
+  output.newline();
+
+  // layerName is at module.deploy level, not environment-specific
+  const layerName = module.deploy?.layerName || deployConfig?.layerName || 'jic-shared-layer';
 
   // Install dependencies
   const installSpinner = createSpinner('Installing dependencies');
@@ -502,7 +742,9 @@ async function deployLambdaLayer(ctx, options) {
     }
   } catch (error) {
     installSpinner.fail('Failed to install dependencies');
-    throw new DeployError('Failed to install dependencies for layer');
+    const deployError = new DeployError('Failed to install dependencies for layer');
+    deployError.cause = error;
+    throw deployError;
   }
 
   // Create zip
@@ -518,19 +760,22 @@ async function deployLambdaLayer(ctx, options) {
     }
   } catch (error) {
     zipSpinner.fail('Failed to create package');
-    throw new DeployError('Failed to create layer package');
+    const deployError = new DeployError('Failed to create layer package');
+    deployError.cause = error;
+    throw deployError;
   }
 
   // Publish layer
   const publishSpinner = createSpinner('Publishing layer');
   publishSpinner.start();
 
+  let awsLayerVersion = null;
   try {
     if (ctx.dryRun) {
       publishSpinner.info(`[dry-run] Would publish ${layerName}`);
     } else {
       const result = await exec(
-        `aws lambda publish-layer-version --layer-name ${layerName} --zip-file fileb://${module.absolutePath}/layer.zip --compatible-runtimes nodejs18.x nodejs20.x --region ${awsConfig.region} ${profile}`,
+        `aws lambda publish-layer-version --layer-name ${layerName} --zip-file fileb://${module.absolutePath}/layer.zip --compatible-runtimes nodejs18.x nodejs20.x --description "v${version}" --region ${awsConfig.region} ${profile}`,
         { silent: true }
       );
 
@@ -538,15 +783,41 @@ async function deployLambdaLayer(ctx, options) {
       await exec(`rm -f ${module.absolutePath}/layer.zip`, { silent: true });
 
       const layerData = JSON.parse(result.stdout);
-      publishSpinner.succeed(`Published ${layerName} version ${layerData.Version}`);
+      awsLayerVersion = layerData.Version;
+      publishSpinner.succeed(`Published ${layerName} version ${awsLayerVersion}`);
     }
   } catch (error) {
     publishSpinner.fail('Layer publish failed');
-    throw new DeployError('Layer publish failed');
+    const deployError = new DeployError('Layer publish failed');
+    deployError.cause = error;
+    throw deployError;
+  }
+
+  // Update state
+  if (!ctx.dryRun) {
+    const commit = await getGitCommit(module.absolutePath);
+    updateDeployVersion(ctx.config, versionKey, env, version, commit);
+
+    // Also store the AWS layer version number
+    if (!ctx.config.state.lambdaVersions) {
+      ctx.config.state.lambdaVersions = { dev: {}, prod: {} };
+    }
+    if (!ctx.config.state.lambdaVersions[env]) {
+      ctx.config.state.lambdaVersions[env] = {};
+    }
+    ctx.config.state.lambdaVersions[env]['_layer'] = {
+      version,
+      awsVersion: awsLayerVersion,
+      layerName,
+      deployedAt: new Date().toISOString(),
+      commit
+    };
+
+    await saveState(ctx.config);
   }
 
   output.newline();
-  output.success(`Lambda layer deployed to ${env}`);
+  output.success(`Lambda layer v${version} deployed to ${env}`);
 }
 
 /**
@@ -629,6 +900,100 @@ async function deployStatus(ctx, options) {
       });
     }
   }
+}
+
+/**
+ * Build dependencies for specified services
+ * Collects and builds all flux client dependencies
+ */
+async function buildDependencies(ctx, serviceNames) {
+  output.subheader('Building Dependencies');
+
+  // Collect all unique dependencies from the services
+  const allDeps = new Set();
+
+  for (const serviceName of serviceNames) {
+    const module = ctx.getModule(serviceName);
+    if (module?.dependencies) {
+      for (const dep of module.dependencies) {
+        allDeps.add(dep);
+      }
+    }
+  }
+
+  if (allDeps.size === 0) {
+    output.info('No dependencies to build');
+    return;
+  }
+
+  // Build each dependency
+  for (const depName of allDeps) {
+    const depModule = ctx.getModule(depName);
+    if (!depModule) {
+      output.warning(`Dependency not found: ${depName}`);
+      continue;
+    }
+
+    const spinner = createSpinner(`Building ${depModule.name}`);
+    spinner.start();
+
+    try {
+      const buildCmd = depModule.build?.command || 'mvn clean install';
+
+      if (ctx.dryRun) {
+        spinner.info(`${depModule.name}: [dry-run] ${buildCmd}`);
+        continue;
+      }
+
+      await execInModule(depModule, buildCmd, { silent: true });
+      spinner.succeed(`${depModule.name}: built`);
+    } catch (error) {
+      spinner.fail(`${depModule.name}: build failed`);
+      const deployError = new DeployError(`Failed to build dependency ${depModule.name}`);
+      deployError.cause = error;
+      throw deployError;
+    }
+  }
+
+  output.newline();
+}
+
+/**
+ * Build all flux clients
+ */
+async function buildAllFluxClients(ctx) {
+  output.subheader('Building Flux Clients');
+
+  const fluxModules = getModulesByType(ctx.config, 'flux-client');
+
+  if (fluxModules.length === 0) {
+    output.info('No flux clients to build');
+    return;
+  }
+
+  for (const module of fluxModules) {
+    const spinner = createSpinner(`Building ${module.name}`);
+    spinner.start();
+
+    try {
+      const buildCmd = module.build?.command || 'mvn clean install';
+
+      if (ctx.dryRun) {
+        spinner.info(`${module.name}: [dry-run] ${buildCmd}`);
+        continue;
+      }
+
+      await execInModule(module, buildCmd, { silent: true });
+      spinner.succeed(`${module.name}: built`);
+    } catch (error) {
+      spinner.fail(`${module.name}: build failed`);
+      const deployError = new DeployError(`Failed to build flux client ${module.name}`);
+      deployError.cause = error;
+      throw deployError;
+    }
+  }
+
+  output.newline();
 }
 
 export default { registerDeployCommands };
