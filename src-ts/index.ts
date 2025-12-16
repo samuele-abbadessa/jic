@@ -22,6 +22,7 @@ import {
   registerSessionCommand,
   registerAwsCommand,
 } from './commands/index.js';
+import { registerDashboardCommand } from './dashboard/index.js';
 
 const VERSION = '2.0.0-alpha.1';
 
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
     registerServeCommand(program, createCtx);
     registerSessionCommand(program, createCtx);
     registerAwsCommand(program, createCtx);
+    registerDashboardCommand(program, createCtx);
 
     // Add status command
     program
