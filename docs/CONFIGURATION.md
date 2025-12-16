@@ -1,480 +1,369 @@
-# JIC-CLI Configuration Reference
+# JIC CLI Configuration
 
-## Configuration Files Overview
+This document describes the configuration system for JIC CLI v2.0, including the inheritance chain that dramatically reduces configuration verbosity.
 
-| File | Location | Git-tracked | Purpose |
-|------|----------|-------------|---------|
-| `jic.config.json` | Project root | Yes | Shared project configuration |
-| `jic.local.json` | Project root | No | Local overrides and secrets |
-| `jic.state.json` | Project root | No | Runtime state (sessions, versions) |
+## Configuration File
 
-## Project Configuration Schema (`jic.config.json`)
+JIC CLI looks for configuration in the following locations (in order):
 
+1. Path specified with `--config` flag
+2. `jic.config.json` in current directory
+3. `jic.config.json` in parent directories (up to git root)
+
+## Configuration Inheritance
+
+The key feature of v2.0 is configuration inheritance. Instead of repeating the same settings for each module, you define defaults once and only override what differs.
+
+### Inheritance Chain
+
+```
+Built-in Defaults → Config Defaults → Module Config → CLI Options
+       ↓                  ↓                ↓              ↓
+   (hardcoded)      (jic.config.json    (per module)   (runtime)
+                     defaults section)
+```
+
+### Example: Before vs After
+
+**Before (verbose - ~50 lines per module):**
 ```json
 {
-  "$schema": "./node_modules/jic-cli/schema/jic.config.schema.json",
-  "version": "1.0.0",
-  "project": {
-    "name": "joyincloud",
-    "description": "JoyInCloud Multi-tenant Business Platform",
-    "rootDir": "."
-  },
-
   "modules": {
-    "joyincloud-gw-client": {
-      "type": "frontend",
-      "directory": "joyincloud-gw-client",
-      "aliases": ["gwc", "frontend", "client"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "npm run build",
-        "preBuild": "rm -rf node_modules/.cache .angular/cache",
-        "outputDir": "target/classes/static",
-        "env": {
-          "NODE_OPTIONS": "--max_old_space_size=4096"
-        }
-      },
-      "deploy": {
-        "type": "s3-cloudfront",
-        "dev": {
-          "bucket": "jic-preprod-client",
-          "distributionId": "E2D6TCOO4OB8VU"
-        },
-        "prod": {
-          "bucket": "jic-test-client",
-          "distributionId": "E3CD4EA3EWUX7E",
-          "profile": "prod"
-        }
-      }
-    },
-
     "joyincloud-gw-server": {
       "type": "java-service",
       "directory": "joyincloud-gw-server",
       "aliases": ["gws", "gateway"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
+      "port": 8080,
       "build": {
-        "command": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
+        "command": "mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
+        "dockerCommand": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true",
         "dockerImage": "localhost:5000/joyincloudgatewayserver"
       },
-      "deploy": {
-        "type": "ecs",
-        "dev": {
-          "cluster": "jic-dev-cluster",
-          "service": "gws-dev-service",
-          "ecrRepo": "joyincloudgatewayserver",
-          "ecrRegistry": "364420384910.dkr.ecr.eu-south-1.amazonaws.com"
-        },
-        "prod": {
-          "cluster": "jic-test-cluster",
-          "service": "gws-test-service",
-          "ecrRepo": "joyincloudgatewayserver",
-          "ecrRegistry": "963540619228.dkr.ecr.eu-south-1.amazonaws.com",
-          "profile": "prod"
-        }
-      },
-      "port": 8080
+      "serve": {
+        "command": "mvn -q -DskipTests spring-boot:run -Dspring-boot.run.profiles=dev",
+        "healthCheck": "curl -sf http://localhost:8080/management/health",
+        "startupTimeout": 80000
+      }
     },
-
-    "joyincloud-mainservice": {
-      "type": "java-service",
-      "directory": "joyincloud-mainservice",
-      "aliases": ["ms", "mainservice"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
-        "dockerImage": "localhost:5000/joyincloudmainservice"
-      },
-      "deploy": {
-        "type": "ecs",
-        "dev": {
-          "cluster": "jic-dev-cluster",
-          "service": "ms-dev-service",
-          "ecrRepo": "joyincloudmainservice",
-          "ecrRegistry": "364420384910.dkr.ecr.eu-south-1.amazonaws.com"
-        },
-        "prod": {
-          "cluster": "jic-test-cluster",
-          "service": "ms-test-service",
-          "ecrRepo": "joyincloudmainservice",
-          "ecrRegistry": "963540619228.dkr.ecr.eu-south-1.amazonaws.com",
-          "profile": "prod"
-        }
-      },
-      "port": 8081
-    },
-
     "joyincloud-tenant-mainservice": {
       "type": "java-service",
       "directory": "joyincloud-tenant-mainservice",
-      "aliases": ["tms", "tenant-main"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
+      "aliases": ["tms"],
+      "port": 8082,
       "build": {
-        "command": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
+        "command": "mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
+        "dockerCommand": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true",
         "dockerImage": "localhost:5000/joyincloudtenantmainservice"
       },
-      "deploy": {
-        "type": "ecs",
-        "dev": {
-          "cluster": "jic-dev-cluster",
-          "service": "tms-dev-service",
-          "ecrRepo": "joyincloudtenantmainservice",
-          "ecrRegistry": "364420384910.dkr.ecr.eu-south-1.amazonaws.com"
-        },
-        "prod": {
-          "cluster": "jic-test-cluster",
-          "service": "tms-test-service",
-          "ecrRepo": "joyincloudtenantmainservice",
-          "ecrRegistry": "963540619228.dkr.ecr.eu-south-1.amazonaws.com",
-          "profile": "prod"
-        }
-      },
-      "port": 8083,
-      "dependencies": ["jic-tenant-mainsvc-client-flux"]
-    },
-
-    "joyincloud-tenant-agenda": {
-      "type": "java-service",
-      "directory": "joyincloud-tenant-agenda",
-      "aliases": ["tas", "tenant-agenda", "agenda"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
-        "dockerImage": "localhost:5000/joyincloudtenantagenda"
-      },
-      "deploy": {
-        "type": "ecs",
-        "dev": {
-          "cluster": "jic-dev-cluster",
-          "service": "tas-dev-service",
-          "ecrRepo": "joyincloudtenantagenda",
-          "ecrRegistry": "364420384910.dkr.ecr.eu-south-1.amazonaws.com"
-        },
-        "prod": {
-          "cluster": "jic-test-cluster",
-          "service": "tas-test-service",
-          "ecrRepo": "joyincloudtenantagenda",
-          "ecrRegistry": "963540619228.dkr.ecr.eu-south-1.amazonaws.com",
-          "profile": "prod"
-        }
-      },
-      "port": 8082,
-      "dependencies": ["jic-tenant-agenda-client-flux", "jic-tenant-mainsvc-client-flux"]
-    },
-
-    "joyincloud-tenant-notificationservice": {
-      "type": "java-service",
-      "directory": "joyincloud-tenant-notificationservice",
-      "aliases": ["tns", "notifications"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
-        "dockerImage": "localhost:5000/joyincloudtenantnotificationservice"
-      },
-      "deploy": {
-        "type": "ecs",
-        "dev": {
-          "cluster": "jic-dev-cluster",
-          "service": "tns-dev-service",
-          "ecrRepo": "joyincloudtenantnotificationservice",
-          "ecrRegistry": "364420384910.dkr.ecr.eu-south-1.amazonaws.com"
-        },
-        "prod": {
-          "cluster": "jic-test-cluster",
-          "service": "tns-test-service",
-          "ecrRepo": "joyincloudtenantnotificationservice",
-          "ecrRegistry": "963540619228.dkr.ecr.eu-south-1.amazonaws.com",
-          "profile": "prod"
-        }
-      },
-      "port": 8084,
-      "dependencies": ["jic-tenant-mainsvc-client-flux", "whatsapp-service-client-flux"]
-    },
-
-    "jic-tenant-agenda-client-flux": {
-      "type": "flux-client",
-      "directory": "jic-tenant-agenda-client-flux",
-      "aliases": ["flux-agenda", "taf"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "mvn clean install"
-      },
-      "targetService": "joyincloud-tenant-agenda"
-    },
-
-    "jic-tenant-mainsvc-client-flux": {
-      "type": "flux-client",
-      "directory": "jic-tenant-mainsvc-client-flux",
-      "aliases": ["flux-mainsvc", "tmf"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "mvn clean install"
-      },
-      "targetService": "joyincloud-tenant-mainservice"
-    },
-
-    "whatsapp-service-client-flux": {
-      "type": "flux-client",
-      "directory": "whatsapp-service-client-flux",
-      "aliases": ["flux-whatsapp", "waf"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "mvn clean install"
-      },
-      "targetService": "whatsapp-service-server"
-    },
-
-    "whatsapp-service-server": {
-      "type": "node-service",
-      "directory": "whatsapp-service-server",
-      "aliases": ["whatsapp", "wa"],
-      "branches": {
-        "local": "feature/samuele",
-        "dev": "origin/feature/samuele",
-        "main": "origin/master"
-      },
-      "build": {
-        "command": "npm run build"
-      },
-      "port": 3004
-    },
-
-    "aws-lambda-layer": {
-      "type": "lambda-layer",
-      "directory": "aws-lambda-layer",
-      "aliases": ["layer", "lambda-layer"],
-      "branches": {
-        "local": "main",
-        "dev": "origin/main",
-        "main": "origin/main"
-      },
-      "build": {
-        "command": "cd nodejs && npm install --production"
-      },
-      "deploy": {
-        "type": "lambda-layer",
-        "layerName": "jic-shared-layer",
-        "dev": {
-          "region": "eu-south-1"
-        },
-        "prod": {
-          "region": "eu-south-1",
-          "profile": "prod"
-        }
-      }
-    },
-
-    "aws-lambda-functions": {
-      "type": "lambda-functions",
-      "directory": "aws-lambda-functions",
-      "aliases": ["lambdas", "functions"],
-      "branches": {
-        "local": "main",
-        "dev": "origin/main",
-        "main": "origin/main"
-      },
-      "functions": [
-        "importClienti",
-        "importProdotti",
-        "importPagamenti",
-        "importAccontiSospesi",
-        "importMovimentiContabili",
-        "jasperGenerator",
-        "invioEmailSQSToSES",
-        "mongoBackupToS3",
-        "verifyLicenseStatus",
-        "addTenantID"
-      ],
-      "deploy": {
-        "type": "lambda",
-        "dev": {
-          "region": "eu-south-1"
-        },
-        "prod": {
-          "region": "eu-south-1",
-          "profile": "prod"
-        }
+      "serve": {
+        "command": "mvn -q -DskipTests spring-boot:run -Dspring-boot.run.profiles=dev",
+        "healthCheck": "curl -sf http://localhost:8082/management/health",
+        "startupTimeout": 80000
       }
     }
-  },
-
-  "groups": {
-    "@all": ["*"],
-    "@backend": ["joyincloud-gw-server", "joyincloud-mainservice", "joyincloud-tenant-*"],
-    "@frontend": ["joyincloud-gw-client"],
-    "@flux": ["jic-*-flux", "whatsapp-service-client-flux"],
-    "@java": ["joyincloud-*", "jic-*-flux"],
-    "@node": ["whatsapp-service-server"],
-    "@lambda": ["aws-lambda-*"],
-    "@deployable": ["@backend", "@frontend", "@lambda"]
-  },
-
-  "buildOrder": [
-    { "group": "@flux", "parallel": true },
-    { "group": "@backend", "parallel": true },
-    { "group": "@node", "parallel": true },
-    { "group": "@frontend", "parallel": false }
-  ],
-
-  "aws": {
-    "region": "eu-south-1",
-    "dev": {
-      "profile": "default",
-      "accountId": "364420384910",
-      "ecsCluster": "jic-dev-cluster",
-      "ecrRegistry": "364420384910.dkr.ecr.eu-south-1.amazonaws.com"
-    },
-    "prod": {
-      "profile": "prod",
-      "accountId": "963540619228",
-      "ecsCluster": "jic-test-cluster",
-      "ecrRegistry": "963540619228.dkr.ecr.eu-south-1.amazonaws.com"
-    }
-  },
-
-  "docker": {
-    "localRegistry": "localhost:5000",
-    "composeFile": "docker-compose.yml"
-  },
-
-  "defaults": {
-    "branch": "feature/samuele",
-    "environment": "dev",
-    "failStrategy": "fail-fast"
   }
 }
 ```
 
-## Local Configuration Schema (`jic.local.json`)
-
+**After (with inheritance - ~10 lines per module):**
 ```json
 {
-  "aws": {
-    "dev": {
-      "profile": "my-dev-profile"
-    },
-    "prod": {
-      "profile": "my-prod-profile"
-    }
-  },
-  "editor": "code",
-  "terminal": "gnome-terminal",
-  "notifications": {
-    "enabled": true,
-    "onBuildComplete": true,
-    "onDeployComplete": true,
-    "onError": true
-  },
   "defaults": {
-    "environment": "dev",
-    "verbose": false
-  }
-}
-```
-
-## State File Schema (`jic.state.json`)
-
-```json
-{
-  "version": "1.0.0",
-  "lastUpdated": "2024-12-14T20:30:00Z",
-
-  "sessions": {
-    "importMerged": {
-      "name": "importMerged",
-      "description": "Import functionality merge",
-      "createdAt": "2024-12-14T19:00:00Z",
-      "status": "active",
-      "baseBranch": "feature/samuele",
-      "sessionBranch": "feature/importMerged",
-      "modules": {
-        "joyincloud-gw-client": {
-          "branch": "feature/importMerged",
-          "baseBranch": "feature/samuele",
-          "mergedBranches": ["feature/importProdotti", "feature/importMovimentiContabili"]
-        },
-        "joyincloud-gw-server": {
-          "branch": "feature/importMerged",
-          "baseBranch": "feature/samuele",
-          "mergedBranches": ["feature/importProdotti", "feature/importMovimentiContabili"]
-        }
-      },
-      "plan": ".claude/plans/import-merged.md"
-    }
-  },
-
-  "activeSession": "importMerged",
-
-  "deployVersions": {
-    "dev": {
-      "joyincloud-gw-server": {
-        "version": 45,
-        "deployedAt": "2024-12-14T18:00:00Z",
-        "commit": "abc123"
-      },
-      "joyincloud-tenant-mainservice": {
-        "version": 42,
-        "deployedAt": "2024-12-14T17:30:00Z",
-        "commit": "def456"
+    "build": {
+      "java-service": {
+        "command": "mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
+        "dockerCommand": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true"
       }
     },
-    "prod": {
-      "joyincloud-gw-server": {
-        "version": 2.25,
-        "deployedAt": "2024-12-10T10:00:00Z",
-        "commit": "xyz789"
+    "serve": {
+      "java-service": {
+        "command": "mvn -q -DskipTests spring-boot:run -Dspring-boot.run.profiles=dev",
+        "healthCheckPath": "/management/health",
+        "startupTimeout": 80000
       }
     }
   },
-
-  "lastDeploy": {
-    "environment": "dev",
-    "timestamp": "2024-12-14T18:00:00Z",
-    "modules": ["joyincloud-gw-server"],
-    "success": true
-  },
-
-  "buildCache": {
+  "modules": {
     "joyincloud-gw-server": {
-      "lastBuild": "2024-12-14T17:45:00Z",
-      "commit": "abc123",
-      "success": true
+      "type": "java-service",
+      "directory": "joyincloud-gw-server",
+      "aliases": ["gws", "gateway"],
+      "port": 8080,
+      "build": { "dockerImage": "localhost:5000/joyincloudgatewayserver" }
+    },
+    "joyincloud-tenant-mainservice": {
+      "type": "java-service",
+      "directory": "joyincloud-tenant-mainservice",
+      "aliases": ["tms"],
+      "port": 8082,
+      "build": { "dockerImage": "localhost:5000/joyincloudtenantmainservice" }
+    }
+  }
+}
+```
+
+## Configuration Schema
+
+### Root Configuration
+
+```typescript
+interface JicConfig {
+  // Project metadata
+  project?: {
+    name?: string;
+    description?: string;
+  };
+
+  // Default settings per module type
+  defaults?: DefaultsConfig;
+
+  // Module definitions
+  modules: Record<string, ModuleConfig>;
+
+  // Module groups for batch operations
+  groups?: Record<string, string[]>;
+
+  // AWS configuration
+  aws?: AwsConfig;
+
+  // Global defaults
+  globalDefaults?: {
+    environment?: Environment;
+    failStrategy?: FailStrategy;
+  };
+}
+```
+
+### Defaults Configuration
+
+```typescript
+interface DefaultsConfig {
+  // Build defaults per module type
+  build?: Partial<Record<ModuleType, Partial<BuildConfig>>>;
+
+  // Serve defaults per module type
+  serve?: Partial<Record<ModuleType, Partial<ServeConfig>>>;
+
+  // Deploy defaults per type and environment
+  deploy?: {
+    ecs?: Record<Environment, Partial<EcsDeployConfig>>;
+    's3-cloudfront'?: Record<Environment, Partial<S3DeployConfig>>;
+    lambda?: Record<Environment, Partial<LambdaDeployConfig>>;
+  };
+}
+```
+
+### Module Configuration
+
+```typescript
+interface ModuleConfig {
+  // Required
+  type: ModuleType;
+  directory: string;
+
+  // Optional
+  aliases?: string[];
+  port?: number;
+
+  // Overrides (merged with defaults)
+  build?: Partial<BuildConfig>;
+  serve?: Partial<ServeConfig>;
+  deploy?: {
+    dev?: DeployConfig;
+    staging?: DeployConfig;
+    prod?: DeployConfig;
+  };
+
+  // Branch configuration
+  branches?: {
+    local?: string;    // Default local branch
+    remote?: string;   // Default remote branch
+  };
+}
+```
+
+### Build Configuration
+
+```typescript
+interface BuildConfig {
+  command: string;           // Build command
+  preBuild?: string;         // Pre-build hook
+  postBuild?: string;        // Post-build hook
+  cleanCommand?: string;     // Clean command
+  outputDir?: string;        // Build output directory
+  env?: Record<string, string>; // Environment variables
+  timeout?: number;          // Build timeout (ms)
+}
+
+// Docker extension
+interface DockerBuildConfig extends BuildConfig {
+  dockerCommand: string;     // Docker build command
+  dockerImage: string;       // Image name/tag
+  registry?: string;         // Docker registry
+}
+```
+
+### Serve Configuration
+
+```typescript
+interface ServeConfig {
+  command: string;           // Start command
+  healthCheck?: string;      // Health check command
+  healthCheckPath?: string;  // Health check path (auto-generates curl)
+  startupTimeout?: number;   // Startup timeout (ms)
+  env?: Record<string, string>; // Environment variables
+  dependencies?: string[];   // Services to start first
+}
+```
+
+## Module Types
+
+JIC CLI supports the following module types with built-in defaults:
+
+| Type | Description | Build | Serve |
+|------|-------------|-------|-------|
+| `java-service` | Spring Boot services | Maven | Spring Boot run |
+| `flux-client` | WebClient libraries | Maven | - |
+| `frontend` | Angular application | npm | ng serve |
+| `node-service` | Node.js services | npm | npm start |
+| `lambda-layer` | AWS Lambda layers | zip | - |
+| `lambda-functions` | AWS Lambda functions | zip | - |
+
+### Built-in Defaults
+
+```typescript
+// java-service defaults
+{
+  build: {
+    command: 'mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true',
+    dockerCommand: 'mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true'
+  },
+  serve: {
+    command: 'mvn -q -DskipTests spring-boot:run -Dspring-boot.run.profiles=dev',
+    healthCheckPath: '/management/health',
+    startupTimeout: 80000
+  }
+}
+
+// flux-client defaults
+{
+  build: {
+    command: 'mvn clean install'
+  }
+}
+
+// frontend defaults
+{
+  build: {
+    command: 'npm run build',
+    preBuild: 'npm ci'
+  },
+  serve: {
+    command: 'npm start',
+    healthCheckPath: '/',
+    startupTimeout: 60000
+  }
+}
+
+// node-service defaults
+{
+  build: {
+    command: 'npm run build',
+    preBuild: 'npm ci'
+  },
+  serve: {
+    command: 'npm start',
+    startupTimeout: 30000
+  }
+}
+```
+
+## Module Groups
+
+Groups allow batch operations on related modules:
+
+```json
+{
+  "groups": {
+    "@backend": [
+      "joyincloud-gw-server",
+      "joyincloud-tenant-mainservice",
+      "joyincloud-tenant-agenda",
+      "joyincloud-tenant-notificationservice"
+    ],
+    "@flux": [
+      "jic-tenant-agenda-client-flux",
+      "jic-tenant-mainsvc-client-flux",
+      "whatsapp-service-client-flux"
+    ],
+    "@frontend": ["joyincloud-gw-client"],
+    "@minServe": [
+      "joyincloud-gw-server",
+      "joyincloud-tenant-mainservice"
+    ]
+  }
+}
+```
+
+Usage:
+```bash
+jic build @backend          # Build all backend services
+jic git status @flux        # Git status for flux clients
+jic serve @minServe         # Start minimal service set
+```
+
+## AWS Configuration
+
+```json
+{
+  "aws": {
+    "dev": {
+      "profile": "joyincloud-dev",
+      "accountId": "123456789012",
+      "ecsCluster": "jic-dev-cluster",
+      "ecrRegistry": "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+      "logGroup": "jic-dev-logs"
+    },
+    "staging": {
+      "profile": "joyincloud-staging",
+      "accountId": "123456789013",
+      "ecsCluster": "jic-staging-cluster"
+    },
+    "prod": {
+      "profile": "joyincloud-prod",
+      "accountId": "123456789014",
+      "ecsCluster": "jic-prod-cluster"
+    }
+  }
+}
+```
+
+## State File
+
+JIC CLI maintains state in `jic.state.json`:
+
+```json
+{
+  "activeSession": "myFeature",
+  "sessions": {
+    "myFeature": {
+      "name": "myFeature",
+      "status": "active",
+      "createdAt": "2024-01-15T10:00:00Z",
+      "modules": {
+        "joyincloud-gw-server": { "branch": "feature/myFeature" },
+        "joyincloud-tenant-mainservice": { "branch": "feature/myFeature" }
+      }
+    }
+  },
+  "deployments": {
+    "dev": {
+      "joyincloud-gw-server": {
+        "version": "1.2.3",
+        "commit": "abc123",
+        "deployedAt": "2024-01-15T12:00:00Z",
+        "status": "deployed"
+      }
     }
   }
 }
@@ -482,33 +371,70 @@
 
 ## Environment Variables
 
-The CLI respects the following environment variables:
+JIC CLI respects these environment variables:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `JIC_CONFIG` | Path to config file | `./jic.config.json` |
-| `JIC_ENV` | Default environment | `dev` |
-| `JIC_PROFILE` | AWS profile override | (from config) |
-| `JIC_NO_COLOR` | Disable colored output | `false` |
-| `JIC_VERBOSE` | Enable verbose output | `false` |
-| `JIC_DRY_RUN` | Enable dry-run mode | `false` |
+| Variable | Description |
+|----------|-------------|
+| `JIC_CONFIG` | Path to config file |
+| `JIC_ENV` | Default environment (dev/staging/prod) |
+| `JIC_VERBOSE` | Enable verbose output |
+| `JIC_DRY_RUN` | Enable dry-run mode |
+| `JIC_NO_COLOR` | Disable colored output |
 
-## Module Type Reference
+## CLI Option Overrides
 
-### `frontend`
-Angular/React applications deployed to S3 with CloudFront.
+Global options override configuration:
 
-### `java-service`
-Spring Boot microservices built with Maven, deployed as Docker containers to ECS.
+```bash
+jic build --env prod          # Override environment
+jic build --dry-run           # Preview without executing
+jic build --fail-fast         # Stop on first error
+jic build --continue-on-error # Continue despite errors
+jic build --verbose           # Detailed output
+jic build --quiet             # Minimal output
+jic build --json              # JSON output
+jic build --no-color          # Disable colors
+```
 
-### `flux-client`
-Maven libraries providing type-safe WebClient interfaces for inter-service communication.
+## Configuration Resolution
 
-### `node-service`
-Node.js services deployed to ECS or run locally.
+When a command runs, configuration is resolved in this order:
 
-### `lambda-layer`
-Shared Lambda layer containing common dependencies.
+1. **Load base config**: Read `jic.config.json`
+2. **Apply built-in defaults**: Merge hardcoded defaults for each module type
+3. **Apply config defaults**: Merge `defaults` section per module type
+4. **Apply module config**: Merge module-specific overrides
+5. **Resolve paths**: Convert relative paths to absolute
+6. **Apply CLI options**: Override with command-line flags
 
-### `lambda-functions`
-Individual Lambda functions deployed via zip upload.
+The result is a `ResolvedModule` with all settings computed:
+
+```typescript
+interface ResolvedModule {
+  name: string;
+  type: ModuleType;
+  directory: string;
+  absolutePath: string;
+  aliases?: string[];
+  port?: number;
+
+  // Fully merged configurations
+  resolvedBuild?: ResolvedBuildConfig;
+  resolvedServe?: ResolvedServeConfig;
+  resolvedDeploy?: ResolvedDeployConfig;
+}
+```
+
+## Migration from v1
+
+If you have an existing v1 configuration without defaults, JIC CLI will work with it directly. To take advantage of inheritance:
+
+1. Identify common patterns across modules of the same type
+2. Extract those patterns to the `defaults` section
+3. Remove duplicated settings from individual modules
+4. Keep only module-specific overrides (ports, image names, etc.)
+
+The CLI can help identify patterns:
+```bash
+jic config analyze  # (future) Suggest defaults based on current config
+```
