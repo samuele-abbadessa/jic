@@ -97,8 +97,8 @@ export function registerServeCommand(
 
   infra
     .command('start')
-    .description('Start infrastructure (MongoDB, Eureka, etc.)')
-    .option('--no-localstack', 'Skip LocalStack')
+    .description('Start infrastructure (MongoDB, Eureka)')
+    .option('--localstack', 'Also start LocalStack')
     .action(
       withErrorHandling(async (options: { localstack?: boolean }) => {
         const ctx = await createContext();
@@ -109,16 +109,17 @@ export function registerServeCommand(
   infra
     .command('stop')
     .description('Stop infrastructure')
+    .option('--localstack', 'Also stop LocalStack')
     .action(
-      withErrorHandling(async () => {
+      withErrorHandling(async (options: { localstack?: boolean }) => {
         const ctx = await createContext();
-        await infraStop(ctx);
+        await infraStop(ctx, options);
       })
     );
 
   infra
     .command('status')
-    .description('Show infrastructure status')
+    .description('Show infrastructure status (all services including LocalStack)')
     .action(
       withErrorHandling(async () => {
         const ctx = await createContext();
@@ -468,10 +469,17 @@ async function infraStart(
 
   ctx.output.header('Starting Infrastructure');
 
+  // Core services - always started
   const services = ['mongodb', 'mongo-init', 'eureka-registry', 'registry'];
-  if (options.localstack !== false) {
+
+  // Optional services
+  if (options.localstack) {
     services.push('localstack');
+    ctx.output.info('Including LocalStack');
   }
+
+  ctx.output.keyValue('Services', services.join(', '));
+  ctx.output.newline();
 
   const spinner = ctx.output.spinner('Starting containers');
   spinner.start();
@@ -512,11 +520,25 @@ async function infraStart(
   throw new ServeError('Infrastructure did not become healthy');
 }
 
-async function infraStop(ctx: IExecutionContext): Promise<void> {
+async function infraStop(
+  ctx: IExecutionContext,
+  options: { localstack?: boolean } = {}
+): Promise<void> {
   const composeFile = 'docker-compose-infra.yml';
   const composePath = join(ctx.projectRoot, composeFile);
 
   ctx.output.header('Stopping Infrastructure');
+
+  // Determine which services to stop
+  // Core services only by default, unless --localstack is specified
+  const services = ['mongodb', 'mongo-init', 'eureka-registry', 'registry'];
+  if (options.localstack) {
+    services.push('localstack');
+    ctx.output.info('Including LocalStack');
+  }
+
+  ctx.output.keyValue('Services', services.join(', '));
+  ctx.output.newline();
 
   const spinner = ctx.output.spinner('Stopping containers');
   spinner.start();
@@ -527,7 +549,8 @@ async function infraStop(ctx: IExecutionContext): Promise<void> {
       return;
     }
 
-    await exec(`docker compose -f ${composePath} down`, {
+    // Stop specific services instead of all
+    await exec(`docker compose -f ${composePath} stop ${services.join(' ')}`, {
       cwd: ctx.projectRoot,
       silent: true,
     });
@@ -555,8 +578,9 @@ async function infraStatus(ctx: IExecutionContext): Promise<void> {
 
 async function showInfraStatus(ctx: IExecutionContext): Promise<void> {
   const services = [
-    { name: 'MongoDB', port: 27017, check: 'docker exec joyincloud_mongodb mongosh --eval "db.runCommand({ping:1})"' },
-    { name: 'Eureka', port: 8761, check: 'curl -sf http://localhost:8761/actuator/health' },
+    { name: 'MongoDB', port: 27017, check: 'docker exec joyincloud_mongodb mongosh --eval "db.runCommand({ping:1})"', core: true },
+    { name: 'Eureka', port: 8761, check: 'curl -sf http://localhost:8761/actuator/health', core: true },
+    { name: 'LocalStack', port: 4566, check: 'curl -sf http://localhost:4566/_localstack/health', core: false },
   ];
 
   const rows: string[][] = [];
@@ -570,15 +594,17 @@ async function showInfraStatus(ctx: IExecutionContext): Promise<void> {
       // Not healthy
     }
 
+    const nameDisplay = svc.core ? svc.name : colors.muted(svc.name);
     rows.push([
-      svc.name,
+      nameDisplay,
       svc.port.toString(),
       healthy ? colors.success('running') : colors.error('stopped'),
+      svc.core ? 'core' : 'optional',
     ]);
   }
 
   ctx.output.table(rows, {
-    head: ['Service', 'Port', 'Status'],
+    head: ['Service', 'Port', 'Status', 'Type'],
   });
 }
 

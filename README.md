@@ -64,12 +64,17 @@ jic git push [modules...]                # Push current branch
 ### Build Commands
 
 ```bash
-jic build all                            # Build everything
-jic build flux                           # Build flux clients only
-jic build java [services...]             # Build Java services
-jic build docker [services...]           # Build Docker images
-jic build frontend                       # Build Angular frontend
-jic build service <name>                 # Build with dependencies
+jic build                                # Build all modules in dependency order
+jic build @backend                       # Build a group
+jic build gws tms                        # Build specific modules
+jic build --docker                       # Build with Docker images
+jic build --parallel                     # Build in parallel (within dependency levels)
+
+# Dependency-aware builds
+jic build gws --with-deps                # Build gws and its dependencies (flux clients)
+jic build @flux --dependants             # Build flux clients + all services using them
+jic build --show-deps                    # Show dependency tree without building
+jic build gws --with-deps --show-deps    # Show what would be built
 ```
 
 ### Deploy Commands

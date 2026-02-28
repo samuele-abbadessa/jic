@@ -25,7 +25,7 @@ export type ModuleType =
 /**
  * Deployment types
  */
-export type DeployType = 'ecs' | 's3-cloudfront' | 'lambda' | 'lambda-layer';
+export type DeployType = 'ecs' | 's3-cloudfront' | 'lambda' | 'lambda-layer' | 'kubernetes';
 
 /**
  * Environments
@@ -156,13 +156,31 @@ export interface LambdaLayerDeployConfig extends BaseDeployConfig {
 }
 
 /**
+ * Kubernetes deployment configuration
+ */
+export interface KubernetesDeployConfig extends BaseDeployConfig {
+  type: 'kubernetes';
+  /** Kubernetes namespace */
+  namespace: string;
+  /** Kubernetes deployment name */
+  deployment: string;
+  /** Container registry URL (e.g., registry.example.com) */
+  registry: string;
+  /** Override image name (default: module name) */
+  image?: string;
+  /** Default number of replicas */
+  replicas?: number;
+}
+
+/**
  * Union of all deploy configuration types
  */
 export type DeployConfig =
   | EcsDeployConfig
   | S3DeployConfig
   | LambdaDeployConfig
-  | LambdaLayerDeployConfig;
+  | LambdaLayerDeployConfig
+  | KubernetesDeployConfig;
 
 // ============================================================================
 // Lambda-Specific Configuration
@@ -248,8 +266,10 @@ export interface ModuleConfig {
  * This is the key to eliminating configuration verbosity
  */
 export interface DefaultsConfig {
-  /** Default branch for new sessions */
-  branch: string;
+  /** Default branch for new sessions (deprecated, use branches.local) */
+  branch?: string;
+  /** Default branch configuration for all modules */
+  branches?: BranchConfig;
   /** Default environment */
   environment: Environment;
   /** Default failure handling strategy */
@@ -294,6 +314,11 @@ export interface DefaultsConfig {
       staging?: Partial<LambdaLayerDeployConfig>;
       prod?: Partial<LambdaLayerDeployConfig>;
     };
+    kubernetes?: {
+      dev?: Partial<KubernetesDeployConfig>;
+      staging?: Partial<KubernetesDeployConfig>;
+      prod?: Partial<KubernetesDeployConfig>;
+    };
   };
 }
 
@@ -329,6 +354,36 @@ export interface AwsConfig {
   staging?: AwsEnvironmentConfig;
   /** Production environment config */
   prod: AwsEnvironmentConfig;
+}
+
+// ============================================================================
+// Kubernetes Configuration
+// ============================================================================
+
+/**
+ * Kubernetes environment-specific configuration
+ */
+export interface KubernetesEnvironmentConfig {
+  /** Path to kubeconfig file (default: ~/.kube/config) */
+  kubeconfig?: string;
+  /** kubectl context to use */
+  context?: string;
+  /** Default container registry for this environment */
+  registry?: string;
+  /** Default namespace */
+  namespace?: string;
+}
+
+/**
+ * Kubernetes configuration section
+ */
+export interface KubernetesConfig {
+  /** Dev environment config */
+  dev?: KubernetesEnvironmentConfig;
+  /** Staging environment config */
+  staging?: KubernetesEnvironmentConfig;
+  /** Production environment config */
+  prod?: KubernetesEnvironmentConfig;
 }
 
 // ============================================================================
@@ -441,6 +496,9 @@ export interface JicConfig {
 
   /** AWS configuration */
   aws: AwsConfig;
+
+  /** Kubernetes configuration */
+  kubernetes?: KubernetesConfig;
 
   /** Serve configuration */
   serve?: ServeGlobalConfig;

@@ -18,7 +18,7 @@ import type { ManagedProcess } from './execution.js';
 /**
  * Session status
  */
-export type SessionStatus = 'active' | 'ended' | 'merged';
+export type SessionStatus = 'active' | 'paused' | 'ended' | 'merged';
 
 /**
  * Session module state
@@ -106,6 +106,39 @@ export interface Session {
 export type DeploymentStatus = 'deployed' | 'deploying' | 'failed' | 'rolled-back';
 
 /**
+ * Lambda function deployment info
+ */
+export interface LambdaFunctionDeployInfo {
+  /** Function version */
+  version: string;
+  /** AWS Lambda version number */
+  lambdaVersion?: string;
+  /** When this function was deployed */
+  deployedAt: string;
+}
+
+/**
+ * Lambda version state (stored separately from main deployments)
+ */
+export interface LambdaVersionInfo {
+  /** Our version string */
+  version: string;
+  /** AWS version number */
+  awsVersion: string | null;
+  /** When deployed */
+  deployedAt: string;
+  /** Git commit */
+  commit: string;
+  /** Layer name (for _layer entry) */
+  layerName?: string;
+}
+
+/**
+ * Lambda versions state per environment
+ */
+export type LambdaVersionsState = Record<string, LambdaVersionInfo>;
+
+/**
  * Deployment record
  */
 export interface DeploymentRecord {
@@ -128,9 +161,27 @@ export interface DeploymentRecord {
   /** ECS task definition ARN */
   ecsTaskDefinition?: string;
 
+  // ECR-specific (for ECS deployments)
+  /** ECR image tag */
+  ecrImageTag?: string;
+  /** ECR image digest (sha256:...) */
+  ecrImageDigest?: string;
+  /** When the image was pushed to ECR */
+  ecrImagePushedAt?: string;
+
   // Lambda-specific
-  /** Lambda version number */
+  /** Lambda version number (for layer or single function) */
   lambdaVersion?: string;
+  /** Per-function deployment info (for lambda-functions module) */
+  functions?: Record<string, LambdaFunctionDeployInfo>;
+
+  // Kubernetes-specific
+  /** Kubernetes namespace */
+  k8sNamespace?: string;
+  /** Kubernetes deployment name */
+  k8sDeployment?: string;
+  /** Container image tag */
+  k8sImageTag?: string;
 
   // S3-specific
   /** S3 ETag for tracking */
@@ -222,6 +273,13 @@ export interface JicState {
     dev: DeploymentState;
     staging: DeploymentState;
     prod: DeploymentState;
+  };
+
+  /** Lambda-specific version tracking per environment */
+  lambdaVersions?: {
+    dev: LambdaVersionsState;
+    staging: LambdaVersionsState;
+    prod: LambdaVersionsState;
   };
 
   /** Serve state */

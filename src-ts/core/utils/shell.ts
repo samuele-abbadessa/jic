@@ -135,6 +135,39 @@ export async function execCapture(command: string, options: ExecOptions = {}): P
 }
 
 /**
+ * Error class for failed command execution.
+ * Includes stdout, stderr, command, and exit code for debugging.
+ */
+export class ExecError extends Error {
+  readonly stderr: string;
+  readonly stdout: string;
+  readonly command: string;
+  readonly exitCode: number;
+
+  constructor(result: ExecResult) {
+    super(`Command failed with exit code ${result.exitCode}`);
+    this.name = 'ExecError';
+    this.stderr = result.stderr;
+    this.stdout = result.stdout;
+    this.command = result.command;
+    this.exitCode = result.exitCode;
+  }
+}
+
+/**
+ * Execute a command and throw if it fails.
+ * Use this when you need to ensure the command succeeds and want to handle
+ * failures in a catch block with full error details (stdout, stderr, exitCode).
+ */
+export async function execOrThrow(command: string, options: ExecOptions = {}): Promise<ExecResult> {
+  const result = await exec(command, options);
+  if (!result.success) {
+    throw new ExecError(result);
+  }
+  return result;
+}
+
+/**
  * Execute a command with a spinner
  */
 export async function execWithSpinner(

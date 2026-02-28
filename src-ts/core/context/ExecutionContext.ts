@@ -12,7 +12,7 @@
 import type { LoadedConfig } from '../config/loader.js';
 import type { ResolvedModule } from '../types/module.js';
 import type { GlobalOptions } from '../types/execution.js';
-import type { Environment, AwsEnvironmentConfig, FailStrategy } from '../types/config.js';
+import type { Environment, AwsEnvironmentConfig, KubernetesEnvironmentConfig, FailStrategy } from '../types/config.js';
 import type { JicState, Session } from '../types/state.js';
 import { Output, createOutput } from '../utils/output.js';
 import { getModule, resolveModules, saveState } from '../config/loader.js';
@@ -60,6 +60,9 @@ export interface IExecutionContext {
 
   // AWS
   getAwsConfig(env?: Environment): AwsEnvironmentConfig;
+
+  // Kubernetes
+  getK8sConfig(env?: Environment): KubernetesEnvironmentConfig;
 }
 
 // ============================================================================
@@ -218,6 +221,18 @@ export class ExecutionContext implements IExecutionContext {
       ecrRegistry: (envConfig as AwsEnvironmentConfig).ecrRegistry,
       logGroup: (envConfig as AwsEnvironmentConfig).logGroup ?? `jic-${targetEnv}-logs`,
     };
+  }
+
+  // ==========================================================================
+  // Kubernetes Configuration
+  // ==========================================================================
+
+  /**
+   * Get Kubernetes configuration for an environment
+   */
+  getK8sConfig(env?: Environment): KubernetesEnvironmentConfig {
+    const targetEnv = env ?? this.env;
+    return this.config.kubernetes?.[targetEnv] ?? {};
   }
 }
 

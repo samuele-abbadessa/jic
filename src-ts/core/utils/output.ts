@@ -45,6 +45,12 @@ export const colors = {
   stopped: chalk.red,
   pending: chalk.yellow,
   skipped: chalk.gray,
+
+  // Git colors (branch already defined in semantic colors)
+  commit: chalk.yellow,
+  added: chalk.green,
+  deleted: chalk.red,
+  modified: chalk.yellow,
 } as const;
 
 /**
@@ -168,6 +174,14 @@ export class Output {
   info(message: string): void {
     if (this.options.quiet || this.options.json) return;
     console.log(`${icons.info} ${colors.info(message)}`);
+  }
+
+  /**
+   * Print a muted/secondary message (gray text, no icon)
+   */
+  muted(message: string): void {
+    if (this.options.quiet || this.options.json) return;
+    console.log(colors.muted(message));
   }
 
   /**

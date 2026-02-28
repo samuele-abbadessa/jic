@@ -200,6 +200,16 @@ function resolveDeployConfig(
 
   const environments: Environment[] = ['dev', 'staging', 'prod'];
 
+  // Extract parent-level deploy properties (excluding type and env-specific keys)
+  const parentDeployProps: Partial<DeployConfig> = {};
+  if (module.deploy) {
+    for (const [key, value] of Object.entries(module.deploy)) {
+      if (key !== 'type' && key !== 'dev' && key !== 'staging' && key !== 'prod') {
+        (parentDeployProps as Record<string, unknown>)[key] = value;
+      }
+    }
+  }
+
   for (const env of environments) {
     const moduleEnvConfig = module.deploy?.[env];
     if (!moduleEnvConfig) continue;
@@ -211,13 +221,36 @@ function resolveDeployConfig(
     const typeDefaults = defaults.deploy[deployTypeKey as keyof typeof defaults.deploy];
     const envDefaults = typeDefaults?.[env as keyof typeof typeDefaults];
 
+    // Merge defaults with module config, ensuring type and parent props are included
     result[env] = deepMerge<DeployConfig>(
+      { type: deployTypeKey } as DeployConfig,
       envDefaults ?? {},
+      removeUndefined(parentDeployProps),
       removeUndefined(moduleEnvConfig)
     );
   }
 
   return result;
+}
+
+/**
+ * Resolve branches config with default inheritance
+ */
+function resolveBranchesConfig(
+  module: ModuleConfig,
+  defaults: DefaultsConfig
+): ModuleConfig['branches'] {
+  // If module has no branches defined, use defaults
+  if (!module.branches) {
+    return defaults.branches;
+  }
+
+  // If defaults have branches, merge them (module-specific takes precedence)
+  if (defaults.branches) {
+    return deepMerge(defaults.branches, module.branches);
+  }
+
+  return module.branches;
 }
 
 /**
@@ -235,9 +268,13 @@ function resolveModule(
     ? deepMerge<ModuleConfig>(config, localOverrides)
     : config;
 
+  // Resolve branches with defaults
+  const resolvedBranches = resolveBranchesConfig(merged, defaults);
+
   return {
     ...merged,
     name,
+    branches: resolvedBranches,
     absolutePath: join(projectRoot, merged.directory),
     originalConfig: config,
     resolvedBuild: resolveBuildConfig(merged, defaults),

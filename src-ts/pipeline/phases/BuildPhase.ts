@@ -8,8 +8,68 @@
 import type { ResolvedModule } from '../../core/types/module.js';
 import type { IExecutionContext } from '../../core/context/ExecutionContext.js';
 import { BasePhase, type PhaseOptions, type PhaseResult } from '../Phase.js';
-import { execInModule } from '../../core/utils/shell.js';
+import { execInModule, ExecError, type ExecOptions, type ExecResult } from '../../core/utils/shell.js';
 import { isBuildable } from '../../core/types/module.js';
+import { homedir } from 'os';
+import { join } from 'path';
+import { rm } from 'fs/promises';
+
+/**
+ * Execute a command in a module's directory and throw if it fails.
+ * This is a wrapper around execInModule that throws an ExecError on failure,
+ * allowing proper error handling in the catch block.
+ */
+async function execInModuleOrThrow(
+  module: ResolvedModule,
+  command: string,
+  options: ExecOptions = {}
+): Promise<ExecResult> {
+  const result = await execInModule(module, command, options);
+  if (!result.success) {
+    throw new ExecError(result);
+  }
+  return result;
+}
+
+/**
+ * Maven repository cache path for a given module.
+ * Flux clients use groupId: it.keyover.joyincloud
+ */
+function getMavenCachePath(moduleName: string): string {
+  return join(
+    homedir(),
+    '.m2',
+    'repository',
+    'it',
+    'keyover',
+    'joyincloud',
+    moduleName
+  );
+}
+
+/**
+ * Clear Maven repository cache for a flux-client module.
+ * This ensures fresh artifacts are used when rebuilding.
+ */
+async function clearMavenCache(
+  module: ResolvedModule,
+  ctx: IExecutionContext
+): Promise<void> {
+  const cachePath = getMavenCachePath(module.name);
+
+  if (ctx.verbose) {
+    ctx.output.info(`${module.name}: Clearing Maven cache at ${cachePath}`);
+  }
+
+  try {
+    await rm(cachePath, { recursive: true, force: true });
+  } catch (error) {
+    // Ignore errors if directory doesn't exist
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+}
 
 /**
  * Build Phase
@@ -57,6 +117,11 @@ export class BuildPhase extends BasePhase {
     spinner.start();
 
     try {
+      // For flux-client modules, clear Maven cache to ensure fresh artifacts
+      if (module.type === 'flux-client') {
+        await clearMavenCache(module, ctx);
+      }
+
       let command = buildConfig.command;
 
       // Handle skip tests option for Maven builds
@@ -76,7 +141,7 @@ export class BuildPhase extends BasePhase {
         if (ctx.verbose) {
           ctx.output.info(`${module.name} pre-build: ${buildConfig.preBuild}`);
         }
-        await execInModule(module, buildConfig.preBuild, {
+        await execInModuleOrThrow(module, buildConfig.preBuild, {
           silent: !ctx.verbose,
           verbose: ctx.verbose,
           dryRun: ctx.dryRun,
@@ -91,7 +156,7 @@ export class BuildPhase extends BasePhase {
       }
 
       // Execute build command
-      await execInModule(module, command, {
+      await execInModuleOrThrow(module, command, {
         silent: !ctx.verbose,
         verbose: ctx.verbose,
         env: buildConfig.env,
@@ -105,7 +170,7 @@ export class BuildPhase extends BasePhase {
         if (ctx.verbose) {
           ctx.output.info(`${module.name} post-build: ${buildConfig.postBuild}`);
         }
-        await execInModule(module, buildConfig.postBuild, {
+        await execInModuleOrThrow(module, buildConfig.postBuild, {
           silent: !ctx.verbose,
           verbose: ctx.verbose,
           env: buildConfig.env,
@@ -214,7 +279,7 @@ export class DockerBuildPhase extends BasePhase {
       }
 
       // Execute Docker build command
-      await execInModule(module, command, {
+      await execInModuleOrThrow(module, command, {
         silent: !ctx.verbose,
         verbose: ctx.verbose,
         env: buildConfig.env,
@@ -299,7 +364,7 @@ export class CleanPhase extends BasePhase {
         return this.success(module, Date.now() - startTime, `[dry-run] ${cleanCommand}`);
       }
 
-      await execInModule(module, cleanCommand, {
+      await execInModuleOrThrow(module, cleanCommand, {
         silent: !ctx.verbose,
         verbose: ctx.verbose,
       });

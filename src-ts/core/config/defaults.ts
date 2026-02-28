@@ -11,6 +11,7 @@ import type {
   DockerBuildConfig,
   ServeConfig,
   Environment,
+  BranchConfig,
 } from '../types/config.js';
 
 // ============================================================================
@@ -23,6 +24,7 @@ import type {
 export const javaServiceBuildDefaults: BuildConfig & Partial<DockerBuildConfig> = {
   command: 'mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true',
   dockerCommand: 'mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true',
+  cleanCommand: 'mvn clean',
   timeout: 300000, // 5 minutes
 };
 
@@ -31,6 +33,7 @@ export const javaServiceBuildDefaults: BuildConfig & Partial<DockerBuildConfig> 
  */
 export const fluxClientBuildDefaults: BuildConfig = {
   command: 'mvn clean install',
+  cleanCommand: 'mvn clean',
   timeout: 120000, // 2 minutes
 };
 
@@ -39,7 +42,7 @@ export const fluxClientBuildDefaults: BuildConfig = {
  */
 export const frontendBuildDefaults: BuildConfig = {
   command: 'npm run build',
-  preBuild: 'rm -rf node_modules/.cache .angular/cache target/angular target/classes/static',
+  cleanCommand: 'rm -rf node_modules/.cache .angular/cache target/angular target/classes/static',
   outputDir: 'target/classes/static',
   env: {
     NODE_OPTIONS: '--max_old_space_size=4096',
@@ -136,6 +139,15 @@ export const lambdaDeployDefaults: Record<Environment, { profile?: string; regio
   prod: { profile: 'prod', region: 'eu-south-1' },
 };
 
+/**
+ * Default Kubernetes deploy config per environment
+ */
+export const kubernetesDeployDefaults: Record<Environment, Record<string, never>> = {
+  dev: {},
+  staging: {},
+  prod: {},
+};
+
 // ============================================================================
 // Complete Defaults
 // ============================================================================
@@ -144,7 +156,11 @@ export const lambdaDeployDefaults: Record<Environment, { profile?: string; regio
  * Complete built-in defaults configuration
  */
 export const builtInDefaults: DefaultsConfig = {
-  branch: 'main',
+  branches: {
+    local: 'main',
+    dev: 'origin/main',
+    main: 'origin/main',
+  },
   environment: 'dev',
   failStrategy: 'fail-fast',
 
@@ -168,6 +184,7 @@ export const builtInDefaults: DefaultsConfig = {
     's3-cloudfront': s3DeployDefaults,
     lambda: lambdaDeployDefaults,
     'lambda-layer': lambdaDeployDefaults,
+    kubernetes: kubernetesDeployDefaults,
   },
 };
 

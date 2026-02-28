@@ -69,6 +69,11 @@ Built-in Defaults → Config Defaults → Module Config → CLI Options
 ```json
 {
   "defaults": {
+    "branches": {
+      "local": "feature/samuele",
+      "dev": "origin/feature/samuele",
+      "main": "origin/master"
+    },
     "build": {
       "java-service": {
         "command": "mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
@@ -97,10 +102,23 @@ Built-in Defaults → Config Defaults → Module Config → CLI Options
       "aliases": ["tms"],
       "port": 8082,
       "build": { "dockerImage": "localhost:5000/joyincloudtenantmainservice" }
+    },
+    "whatsapp-service-server": {
+      "type": "node-service",
+      "directory": "whatsapp-service-server",
+      "aliases": ["whatsapp", "wa"],
+      "port": 3004,
+      "branches": {
+        "local": "rewrite",
+        "dev": "origin/rewrite",
+        "main": "origin/master"
+      }
     }
   }
 }
 ```
+
+Note how `whatsapp-service-server` overrides the default branches while other modules inherit them.
 
 ## Configuration Schema
 
@@ -138,6 +156,22 @@ interface JicConfig {
 
 ```typescript
 interface DefaultsConfig {
+  // Default branch for new sessions (deprecated, use branches)
+  branch?: string;
+
+  // Default branch configuration for all modules
+  branches?: {
+    local: string;   // Local development branch
+    dev: string;     // Development remote branch
+    main: string;    // Main/production remote branch
+  };
+
+  // Default environment
+  environment: Environment;
+
+  // Default failure handling strategy
+  failStrategy: FailStrategy;
+
   // Build defaults per module type
   build?: Partial<Record<ModuleType, Partial<BuildConfig>>>;
 
@@ -149,6 +183,7 @@ interface DefaultsConfig {
     ecs?: Record<Environment, Partial<EcsDeployConfig>>;
     's3-cloudfront'?: Record<Environment, Partial<S3DeployConfig>>;
     lambda?: Record<Environment, Partial<LambdaDeployConfig>>;
+    'lambda-layer'?: Record<Environment, Partial<LambdaLayerDeployConfig>>;
   };
 }
 ```
@@ -164,6 +199,7 @@ interface ModuleConfig {
   // Optional
   aliases?: string[];
   port?: number;
+  dependencies?: string[];  // Modules that must be built before this one
 
   // Overrides (merged with defaults)
   build?: Partial<BuildConfig>;
@@ -174,13 +210,55 @@ interface ModuleConfig {
     prod?: DeployConfig;
   };
 
-  // Branch configuration
+  // Branch configuration (overrides defaults.branches)
   branches?: {
-    local?: string;    // Default local branch
-    remote?: string;   // Default remote branch
+    local?: string;    // Local development branch
+    dev?: string;      // Development remote branch
+    main?: string;     // Main/production remote branch
   };
 }
 ```
+
+### Module Dependencies
+
+Modules can declare dependencies on other modules. When building with `--with-deps`, dependencies are automatically included and built first:
+
+```json
+{
+  "modules": {
+    "joyincloud-gw-server": {
+      "type": "java-service",
+      "directory": "joyincloud-gw-server",
+      "dependencies": [
+        "jic-tenant-mainsvc-client-flux",
+        "jic-tenant-agenda-client-flux"
+      ]
+    },
+    "jic-tenant-mainsvc-client-flux": {
+      "type": "flux-client",
+      "directory": "jic-tenant-mainsvc-client-flux"
+    }
+  }
+}
+```
+
+Usage:
+```bash
+# Build gws with its dependencies (flux clients first)
+jic build gws --with-deps
+
+# Build flux client and all services that depend on it
+jic build jic-tenant-mainsvc-client-flux --dependants
+
+# Show dependency tree
+jic build --show-deps
+```
+
+The build system:
+- Organizes modules into **dependency levels** (level 0 has no deps, level 1 depends only on level 0, etc.)
+- Builds levels sequentially, ensuring dependencies are ready before dependants
+- When using `--parallel`, only modules within the same level are parallelized
+- Deduplicates dependencies (each module is built only once)
 
 ### Build Configuration
 
@@ -317,22 +395,24 @@ jic serve @minServe         # Start minimal service set
 ```json
 {
   "aws": {
+    "region": "eu-south-1",
     "dev": {
-      "profile": "joyincloud-dev",
+      "profile": "default",
       "accountId": "123456789012",
       "ecsCluster": "jic-dev-cluster",
-      "ecrRegistry": "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+      "ecrRegistry": "123456789012.dkr.ecr.eu-south-1.amazonaws.com",
       "logGroup": "jic-dev-logs"
     },
     "staging": {
-      "profile": "joyincloud-staging",
+      "profile": "staging",
       "accountId": "123456789013",
       "ecsCluster": "jic-staging-cluster"
     },
     "prod": {
-      "profile": "joyincloud-prod",
+      "profile": "prod",
       "accountId": "123456789014",
-      "ecsCluster": "jic-prod-cluster"
+      "ecsCluster": "jic-prod-cluster",
+      "ecrRegistry": "123456789014.dkr.ecr.eu-south-1.amazonaws.com"
     }
   }
 }
@@ -344,28 +424,66 @@ JIC CLI maintains state in `jic.state.json`:
 
 ```json
 {
+  "version": "2.0.0",
+  "lastUpdated": "2024-01-15T12:00:00Z",
   "activeSession": "myFeature",
   "sessions": {
     "myFeature": {
       "name": "myFeature",
+      "description": "My feature description",
       "status": "active",
       "createdAt": "2024-01-15T10:00:00Z",
+      "baseBranch": "feature/samuele",
+      "sessionBranch": "feature/myFeature",
       "modules": {
-        "joyincloud-gw-server": { "branch": "feature/myFeature" },
-        "joyincloud-tenant-mainservice": { "branch": "feature/myFeature" }
-      }
+        "joyincloud-gw-server": {
+          "branch": "feature/myFeature",
+          "baseBranch": "feature/samuele"
+        },
+        "joyincloud-tenant-mainservice": {
+          "branch": "feature/myFeature",
+          "baseBranch": "feature/samuele"
+        }
+      },
+      "mergedBranches": []
     }
   },
   "deployments": {
     "dev": {
       "joyincloud-gw-server": {
-        "version": "1.2.3",
+        "moduleName": "joyincloud-gw-server",
+        "environment": "dev",
+        "version": "3.07",
         "commit": "abc123",
         "deployedAt": "2024-01-15T12:00:00Z",
         "status": "deployed"
+      },
+      "aws-lambda-functions": {
+        "moduleName": "aws-lambda-functions",
+        "environment": "dev",
+        "version": "1.01",
+        "commit": "def456",
+        "deployedAt": "2024-01-15T12:00:00Z",
+        "status": "deployed",
+        "functions": {
+          "importClienti": {
+            "version": "1.01",
+            "lambdaVersion": "2",
+            "deployedAt": "2024-01-15T12:00:00Z"
+          }
+        }
       }
+    },
+    "staging": {},
+    "prod": {}
+  },
+  "serve": {
+    "processes": {},
+    "infrastructure": {
+      "running": false
     }
-  }
+  },
+  "buildCache": {}
 }
 ```
 
@@ -394,6 +512,23 @@ jic build --verbose           # Detailed output
 jic build --quiet             # Minimal output
 jic build --json              # JSON output
 jic build --no-color          # Disable colors
+```
+
+### Build-specific Options
+
+```bash
+jic build --docker            # Also build Docker images
+jic build --clean             # Clean before building
+jic build --parallel          # Build in parallel (within dependency levels)
+jic build --skip-tests        # Skip test execution
+jic build -d, --with-deps     # Include dependencies of specified modules
+jic build -D, --dependants    # Also build modules that depend on the specified modules
+jic build --show-deps         # Show dependency tree without building
+jic build --type <type>       # Build only modules of specific type
+jic build --skip-flux         # Skip flux client builds
+jic build --skip-java         # Skip Java service builds
+jic build --skip-node         # Skip Node.js service builds
+jic build --skip-frontend     # Skip frontend build
 ```
 
 ## Configuration Resolution

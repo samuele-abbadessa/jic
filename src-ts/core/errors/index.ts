@@ -25,6 +25,7 @@ export const ExitCodes = {
   SERVE_ERROR: 7,
   SESSION_ERROR: 8,
   VALIDATION_ERROR: 9,
+  KUBERNETES_ERROR: 10,
   INTERRUPTED: 130,
 } as const;
 
@@ -275,6 +276,34 @@ export class ValidationError extends JicError {
     });
     this.name = 'ValidationError';
     this.errors = errors;
+  }
+}
+
+/**
+ * Kubernetes error
+ */
+export class KubernetesError extends JicError {
+  /** Kubernetes resource that failed */
+  readonly resource?: string;
+
+  /** Kubernetes operation that failed */
+  readonly operation?: string;
+
+  constructor(
+    message: string,
+    options: { resource?: string; operation?: string; cause?: Error } = {}
+  ) {
+    super(message, {
+      exitCode: ExitCodes.KUBERNETES_ERROR,
+      context: {
+        resource: options.resource,
+        operation: options.operation,
+      },
+      cause: options.cause,
+    });
+    this.name = 'KubernetesError';
+    this.resource = options.resource;
+    this.operation = options.operation;
   }
 }
 

@@ -4,6 +4,11 @@ node_modules/
 # Build output
 dist/
 
+# Generated files in src-ts (from TypeScript compilation)
+src-ts/**/*.js
+src-ts/**/*.d.ts
+src-ts/**/*.js.map
+
 # Test output
 coverage/
 

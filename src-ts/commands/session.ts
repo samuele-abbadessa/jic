@@ -115,6 +115,18 @@ export function registerSessionCommand(
       )
     );
 
+  // Delete session
+  session
+    .command('delete <name>')
+    .description('Delete a session permanently')
+    .option('-f, --force', 'Also delete session branches from git')
+    .action(
+      withErrorHandling(async (name: string, options: { force?: boolean }) => {
+        const ctx = await createContext();
+        await sessionDelete(ctx, name, options);
+      })
+    );
+
   // Checkout session branches
   session
     .command('checkout [name]')
@@ -193,6 +205,29 @@ export function registerSessionCommand(
         await sessionSwitch(ctx, name);
       })
     );
+
+  // Pause session
+  session
+    .command('pause')
+    .description('Pause session: stash changes, checkout default branches')
+    .option('-u, --include-untracked', 'Include untracked files in stash')
+    .action(
+      withErrorHandling(async (options: { includeUntracked?: boolean }) => {
+        const ctx = await createContext();
+        await sessionPause(ctx, options);
+      })
+    );
+
+  // Resume session
+  session
+    .command('resume [name]')
+    .description('Resume paused session: checkout session branches, pop stash')
+    .action(
+      withErrorHandling(async (name: string | undefined) => {
+        const ctx = await createContext();
+        await sessionResume(ctx, name);
+      })
+    );
 }
 
 // ============================================================================
@@ -242,12 +277,17 @@ async function sessionStart(
     modules = Object.values(ctx.config.resolvedModules);
   }
 
-  // Determine base branch
-  const baseBranch = options.base ?? template?.baseBranch ?? 'feature/samuele';
+  // Determine base branch - if explicitly provided or from template, use that for all modules
+  // Otherwise, use each module's local default branch
+  const explicitBaseBranch = options.base ?? template?.baseBranch;
   const branchPrefix = template?.branchPrefix ?? 'feature/';
   const sessionBranch = `${branchPrefix}${name}`;
 
-  ctx.output.keyValue('Base Branch', baseBranch);
+  if (explicitBaseBranch) {
+    ctx.output.keyValue('Base Branch', explicitBaseBranch);
+  } else {
+    ctx.output.keyValue('Base Branch', 'each module\'s local default');
+  }
   ctx.output.keyValue('Session Branch', sessionBranch);
   ctx.output.keyValue('Modules', modules.map((m) => m.name).join(', '));
   ctx.output.newline();
@@ -258,7 +298,7 @@ async function sessionStart(
     description: options.description ?? template?.description ?? '',
     createdAt: new Date().toISOString(),
     status: 'active',
-    baseBranch,
+    baseBranch: explicitBaseBranch ?? 'local-default', // marker for per-module default
     sessionBranch,
     modules: {},
     mergedBranches: [],
@@ -269,10 +309,16 @@ async function sessionStart(
     const spinner = ctx.output.spinner(`${module.name}: creating branch`);
     spinner.start();
 
+    // Determine base branch for this module
+    const moduleBaseBranch = explicitBaseBranch ??
+      module.branches?.local ??
+      ctx.config.defaults.branches?.local ??
+      'main';
+
     try {
       if (ctx.dryRun) {
-        spinner.info(`[dry-run] Would create branch ${sessionBranch}`);
-        sessionData.modules[module.name] = { branch: sessionBranch };
+        spinner.info(`[dry-run] Would create branch ${sessionBranch} from ${moduleBaseBranch}`);
+        sessionData.modules[module.name] = { branch: sessionBranch, baseBranch: moduleBaseBranch };
         continue;
       }
 
@@ -287,22 +333,37 @@ async function sessionStart(
       const branchExists = await checkBranchExists(module, sessionBranch);
       if (branchExists) {
         // Just checkout existing branch
-        await exec(`git checkout ${sessionBranch}`, {
+        const checkoutResult = await exec(`git checkout ${sessionBranch}`, {
           cwd: module.absolutePath,
           silent: true,
         });
+        if (!checkoutResult.success) {
+          spinner.fail(`${module.name}: failed to checkout ${sessionBranch}`);
+          if (checkoutResult.stderr) {
+            ctx.output.error(`  ${checkoutResult.stderr}`);
+          }
+          continue;
+        }
         spinner.succeed(`${module.name}: checked out existing ${sessionBranch}`);
       } else {
         // Create new branch from base
-        await exec(`git checkout -b ${sessionBranch} ${baseBranch}`, {
+        const createResult = await exec(`git checkout -b ${sessionBranch} ${moduleBaseBranch}`, {
           cwd: module.absolutePath,
           silent: true,
         });
-        spinner.succeed(`${module.name}: created ${sessionBranch}`);
+        if (!createResult.success) {
+          spinner.fail(`${module.name}: failed to create ${sessionBranch} from ${moduleBaseBranch}`);
+          if (createResult.stderr) {
+            ctx.output.error(`  ${createResult.stderr}`);
+          }
+          continue;
+        }
+        spinner.succeed(`${module.name}: created ${sessionBranch} from ${moduleBaseBranch}`);
       }
 
       sessionData.modules[module.name] = {
         branch: sessionBranch,
+        baseBranch: moduleBaseBranch,
         commit: await getGitCommit(module.absolutePath) ?? undefined,
       };
     } catch (error) {
@@ -354,6 +415,54 @@ async function sessionEnd(
     await mergeSessionBranches(ctx, session, options.deleteBranches);
   }
 
+  // Checkout to default local branches in all session modules
+  ctx.output.newline();
+  ctx.output.subheader('Checking out default branches');
+
+  for (const [moduleName] of Object.entries(session.modules)) {
+    const module = ctx.getModule(moduleName);
+    if (!module) continue;
+
+    const defaultBranch = module.branches?.local ??
+      ctx.config.defaults.branches?.local ??
+      'main';
+
+    const spinner = ctx.output.spinner(`${moduleName}: checkout ${defaultBranch}`);
+    spinner.start();
+
+    try {
+      if (ctx.dryRun) {
+        spinner.info(`[dry-run] Would checkout ${defaultBranch}`);
+        continue;
+      }
+
+      // Check for uncommitted changes
+      const status = await getGitStatus(module.absolutePath);
+      if (!status.clean) {
+        spinner.warn(`${moduleName}: has uncommitted changes, skipping checkout`);
+        continue;
+      }
+
+      const checkoutResult = await exec(`git checkout ${defaultBranch}`, {
+        cwd: module.absolutePath,
+        silent: true,
+      });
+      if (!checkoutResult.success) {
+        spinner.fail(`${moduleName}: failed to checkout ${defaultBranch}`);
+        if (checkoutResult.stderr) {
+          ctx.output.error(`  ${checkoutResult.stderr}`);
+        }
+        continue;
+      }
+      spinner.succeed(`${moduleName}: on ${defaultBranch}`);
+    } catch (error) {
+      spinner.fail(`${moduleName}: checkout failed`);
+      if (ctx.verbose && error instanceof Error) {
+        ctx.output.error(`  ${error.message}`);
+      }
+    }
+  }
+
   // Update session status
   if (!ctx.dryRun) {
     session.status = 'ended';
@@ -367,7 +476,116 @@ async function sessionEnd(
     await ctx.saveState();
   }
 
+  ctx.output.newline();
   ctx.output.success(`Session '${sessionName}' ended`);
+}
+
+// ============================================================================
+// Session Delete
+// ============================================================================
+
+async function sessionDelete(
+  ctx: IExecutionContext,
+  name: string,
+  options: { force?: boolean }
+): Promise<void> {
+  const session = ctx.state.sessions?.[name];
+  if (!session) {
+    throw new SessionError(`Session '${name}' not found`);
+  }
+
+  ctx.output.header(`Delete Session: ${name}`);
+
+  // Warn if session is active
+  if (session.status === 'active') {
+    ctx.output.warning('This session is currently active');
+  }
+
+  // Delete branches if --force
+  if (options.force) {
+    ctx.output.subheader('Deleting branches');
+
+    for (const [moduleName, moduleSession] of Object.entries(session.modules)) {
+      const module = ctx.getModule(moduleName);
+      if (!module) continue;
+
+      const spinner = ctx.output.spinner(`${moduleName}: deleting ${moduleSession.branch}`);
+      spinner.start();
+
+      try {
+        if (ctx.dryRun) {
+          spinner.info(`[dry-run] Would delete branch ${moduleSession.branch}`);
+          continue;
+        }
+
+        // Check if we're currently on this branch
+        const currentBranch = await getGitBranch(module.absolutePath);
+        if (currentBranch === moduleSession.branch) {
+          // Checkout default branch first
+          const defaultBranch = moduleSession.baseBranch ??
+            module.branches?.local ??
+            ctx.config.defaults.branches?.local ??
+            'main';
+
+          const checkoutResult = await exec(`git checkout ${defaultBranch}`, {
+            cwd: module.absolutePath,
+            silent: true,
+          });
+          if (!checkoutResult.success) {
+            spinner.fail(`${moduleName}: cannot checkout ${defaultBranch} before deleting`);
+            if (checkoutResult.stderr) {
+              ctx.output.error(`  ${checkoutResult.stderr}`);
+            }
+            continue;
+          }
+        }
+
+        // Delete the branch
+        const deleteResult = await exec(`git branch -D ${moduleSession.branch}`, {
+          cwd: module.absolutePath,
+          silent: true,
+        });
+
+        if (deleteResult.success) {
+          spinner.succeed(`${moduleName}: deleted ${moduleSession.branch}`);
+        } else {
+          // Branch might not exist locally
+          if (deleteResult.stderr?.includes('not found')) {
+            spinner.info(`${moduleName}: branch not found (already deleted?)`);
+          } else {
+            spinner.fail(`${moduleName}: failed to delete`);
+            if (deleteResult.stderr) {
+              ctx.output.error(`  ${deleteResult.stderr}`);
+            }
+          }
+        }
+      } catch (error) {
+        spinner.fail(`${moduleName}: error deleting branch`);
+        if (ctx.verbose && error instanceof Error) {
+          ctx.output.error(`  ${error.message}`);
+        }
+      }
+    }
+
+    ctx.output.newline();
+  }
+
+  // Remove session from state
+  if (!ctx.dryRun) {
+    delete ctx.state.sessions?.[name];
+
+    // Clear active session if this was it
+    if (ctx.state.activeSession === name) {
+      ctx.state.activeSession = undefined;
+    }
+
+    await ctx.saveState();
+  }
+
+  ctx.output.success(`Session '${name}' deleted`);
+  if (!options.force) {
+    ctx.output.info('Branches were not deleted. Use --force to also delete git branches.');
+  }
 }
 
 async function mergeSessionBranches(
@@ -381,36 +599,59 @@ async function mergeSessionBranches(
     const module = ctx.getModule(moduleName);
     if (!module) continue;
 
-    const spinner = ctx.output.spinner(`${moduleName}: merging to ${session.baseBranch}`);
+    // Use per-module base branch if stored, otherwise fall back to session base or module default
+    const targetBranch = moduleSession.baseBranch ??
+      (session.baseBranch !== 'local-default' ? session.baseBranch : null) ??
+      module.branches?.local ??
+      ctx.config.defaults.branches?.local ??
+      'main';
+
+    const spinner = ctx.output.spinner(`${moduleName}: merging to ${targetBranch}`);
     spinner.start();
 
     try {
       if (ctx.dryRun) {
-        spinner.info(`[dry-run] Would merge ${moduleSession.branch} to ${session.baseBranch}`);
+        spinner.info(`[dry-run] Would merge ${moduleSession.branch} to ${targetBranch}`);
         continue;
       }
 
       // Checkout base branch
-      await exec(`git checkout ${session.baseBranch}`, {
+      const checkoutResult = await exec(`git checkout ${targetBranch}`, {
         cwd: module.absolutePath,
         silent: true,
       });
+      if (!checkoutResult.success) {
+        spinner.fail(`${moduleName}: failed to checkout ${targetBranch}`);
+        if (checkoutResult.stderr) {
+          ctx.output.error(`  ${checkoutResult.stderr}`);
+        }
+        continue;
+      }
 
       // Merge session branch
-      await exec(`git merge ${moduleSession.branch} --no-edit`, {
+      const mergeResult = await exec(`git merge ${moduleSession.branch} --no-edit`, {
         cwd: module.absolutePath,
         silent: true,
       });
+      if (!mergeResult.success) {
+        spinner.fail(`${moduleName}: merge failed`);
+        if (mergeResult.stderr) {
+          ctx.output.error(`  ${mergeResult.stderr}`);
+        }
+        continue;
+      }
 
-      spinner.succeed(`${moduleName}: merged`);
+      spinner.succeed(`${moduleName}: merged to ${targetBranch}`);
 
       // Delete branch if requested
       if (deleteBranches) {
-        await exec(`git branch -d ${moduleSession.branch}`, {
+        const deleteResult = await exec(`git branch -d ${moduleSession.branch}`, {
           cwd: module.absolutePath,
           silent: true,
         });
-        ctx.output.info(`  Deleted branch ${moduleSession.branch}`);
+        if (deleteResult.success) {
+          ctx.output.info(`  Deleted branch ${moduleSession.branch}`);
+        }
       }
     } catch (error) {
       spinner.fail(`${moduleName}: merge failed`);
@@ -464,10 +705,17 @@ async function sessionCheckout(
         continue;
       }
 
-      await exec(`git checkout ${moduleSession.branch}`, {
+      const checkoutResult = await exec(`git checkout ${moduleSession.branch}`, {
         cwd: module.absolutePath,
         silent: true,
       });
+      if (!checkoutResult.success) {
+        spinner.fail(`${moduleName}: failed to checkout ${moduleSession.branch}`);
+        if (checkoutResult.stderr) {
+          ctx.output.error(`  ${checkoutResult.stderr}`);
+        }
+        continue;
+      }
       spinner.succeed(`${moduleName}: on ${moduleSession.branch}`);
     } catch (error) {
       spinner.fail(`${moduleName}: checkout failed`);
@@ -508,18 +756,127 @@ async function sessionList(ctx: IExecutionContext, options: { all?: boolean }): 
     const isActive = ctx.state.activeSession === session.name;
     const moduleCount = Object.keys(session.modules).length;
 
+    // Check if session branch was merged
+    const mergeInfo = await checkSessionMergeStatus(ctx, session);
+
     rows.push([
       isActive ? colors.success(`* ${session.name}`) : `  ${session.name}`,
       session.status === 'active' ? colors.success('active') : colors.muted('ended'),
       String(moduleCount),
       session.sessionBranch,
       new Date(session.createdAt).toLocaleDateString(),
+      mergeInfo.merged
+        ? colors.success(`Yes (${mergeInfo.mergedAt ?? 'unknown'})`)
+        : colors.muted('No'),
     ]);
   }
 
   ctx.output.table(rows, {
-    head: ['Name', 'Status', 'Modules', 'Branch', 'Created'],
+    head: ['Name', 'Status', 'Modules', 'Branch', 'Created', 'Merged'],
   });
+}
+
+/**
+ * Check if a session's branches have been merged into their base branches.
+ * A session is considered merged only if:
+ * 1. The session branch has commits beyond its starting point (actual work was done)
+ * 2. Those commits are now ancestors of the local dev branch
+ */
+async function checkSessionMergeStatus(
+  ctx: IExecutionContext,
+  session: Session
+): Promise<{ merged: boolean; mergedAt?: string }> {
+  const moduleEntries = Object.entries(session.modules);
+  if (moduleEntries.length === 0) {
+    return { merged: false };
+  }
+
+  let mergedCount = 0;
+  let checkedCount = 0;
+  let latestMergeDate: Date | null = null;
+
+  for (const [moduleName, moduleSession] of moduleEntries) {
+    const module = ctx.getModule(moduleName);
+    if (!module) continue;
+
+    // Determine the local dev branch for this module
+    const localBranch = module.branches?.local ??
+      ctx.config.defaults.branches?.local ??
+      'main';
+
+    try {
+      // First check if the session branch still exists
+      const branchExists = await exec(
+        `git show-ref --verify --quiet refs/heads/${moduleSession.branch}`,
+        { cwd: module.absolutePath, silent: true }
+      );
+
+      if (!branchExists.success) {
+        // Branch doesn't exist - could have been deleted after merge
+        // Check if we had a starting commit and if it's in the local branch
+        if (moduleSession.commit) {
+          const commitInLocal = await exec(
+            `git merge-base --is-ancestor ${moduleSession.commit} ${localBranch}`,
+            { cwd: module.absolutePath, silent: true }
+          );
+          if (commitInLocal.success) {
+            // Starting commit is in local, but we can't verify if work was done
+            // Skip this module for merge detection
+          }
+        }
+        continue;
+      }
+
+      checkedCount++;
+
+      // Get current HEAD of the session branch
+      const sessionHeadResult = await exec(
+        `git rev-parse ${moduleSession.branch}`,
+        { cwd: module.absolutePath, silent: true }
+      );
+      const sessionHead = sessionHeadResult.stdout?.trim();
+      if (!sessionHead) continue;
+
+      // Check if work was done on the session branch
+      // Compare current HEAD with starting commit
+      const startingCommit = moduleSession.commit;
+      if (startingCommit && sessionHead === startingCommit) {
+        // No commits were made on this session branch - nothing to merge
+        continue;
+      }
+
+      // Work was done - check if it's been merged into the local dev branch
+      const mergeResult = await exec(
+        `git merge-base --is-ancestor ${sessionHead} ${localBranch}`,
+        { cwd: module.absolutePath, silent: true }
+      );
+
+      if (mergeResult.success) {
+        mergedCount++;
+
+        // Try to find when it was merged
+        const mergeLogResult = await exec(
+          `git log --format=%aI --ancestry-path ${sessionHead}..${localBranch} -1`,
+          { cwd: module.absolutePath, silent: true }
+        );
+
+        if (mergeLogResult.stdout?.trim()) {
+          const mergeDate = new Date(mergeLogResult.stdout.trim());
+          if (!latestMergeDate || mergeDate > latestMergeDate) {
+            latestMergeDate = mergeDate;
+          }
+        }
+      }
+    } catch {
+      // Branch might not exist or other git error - skip
+    }
+  }
+
+  // Consider session merged only if at least one module with work was merged
+  const merged = mergedCount > 0 && mergedCount === checkedCount;
+  const mergedAt = latestMergeDate ? latestMergeDate.toLocaleDateString() : undefined;
+
+  return { merged, mergedAt };
 }
 
 // ============================================================================
@@ -604,7 +961,13 @@ async function sessionAddModule(ctx: IExecutionContext, moduleRef: string): Prom
 
   ctx.output.header(`Add Module: ${module.name}`);
 
-  const spinner = ctx.output.spinner(`Creating branch ${session.sessionBranch}`);
+  // Determine base branch for this module
+  // Use session's explicit base if set, otherwise use module's local default
+  const moduleBaseBranch = session.baseBranch !== 'local-default'
+    ? session.baseBranch
+    : module.branches?.local ?? ctx.config.defaults.branches?.local ?? 'main';
+
+  const spinner = ctx.output.spinner(`Creating branch ${session.sessionBranch} from ${moduleBaseBranch}`);
   spinner.start();
 
   try {
@@ -615,21 +978,31 @@ async function sessionAddModule(ctx: IExecutionContext, moduleRef: string): Prom
 
     // Create branch
     const branchExists = await checkBranchExists(module, session.sessionBranch);
+    let execResult;
     if (!branchExists) {
-      await exec(`git checkout -b ${session.sessionBranch} ${session.baseBranch}`, {
+      execResult = await exec(`git checkout -b ${session.sessionBranch} ${moduleBaseBranch}`, {
         cwd: module.absolutePath,
         silent: true,
       });
     } else {
-      await exec(`git checkout ${session.sessionBranch}`, {
+      execResult = await exec(`git checkout ${session.sessionBranch}`, {
         cwd: module.absolutePath,
         silent: true,
       });
     }
 
+    if (!execResult.success) {
+      spinner.fail(`Failed to checkout/create branch`);
+      if (execResult.stderr) {
+        ctx.output.error(`  ${execResult.stderr}`);
+      }
+      throw new SessionError(`Failed to create branch ${session.sessionBranch}`);
+    }
+
     // Add to session
     session.modules[module.name] = {
       branch: session.sessionBranch,
+      baseBranch: moduleBaseBranch,
       commit: await getGitCommit(module.absolutePath) ?? undefined,
     };
 
@@ -728,17 +1101,281 @@ async function listTemplates(ctx: IExecutionContext): Promise<void> {
 }
 
 // ============================================================================
+// Session Pause
+// ============================================================================
+
+async function sessionPause(
+  ctx: IExecutionContext,
+  options: { includeUntracked?: boolean }
+): Promise<void> {
+  const sessionName = ctx.state.activeSession;
+  if (!sessionName) {
+    throw new SessionError('No active session to pause');
+  }
+
+  const session = ctx.state.sessions?.[sessionName];
+  if (!session) {
+    throw new SessionError(`Session '${sessionName}' not found`);
+  }
+
+  if (session.status !== 'active') {
+    throw new SessionError(`Session '${sessionName}' is not active (status: ${session.status})`);
+  }
+
+  ctx.output.header(`Pause Session: ${sessionName}`);
+
+  // Step 1: Stash changes in all session modules with uncommitted changes
+  ctx.output.subheader('Stashing changes');
+
+  const stashMessage = `jic-session-pause:${sessionName}:${new Date().toISOString()}`;
+  let stashedCount = 0;
+
+  for (const [moduleName] of Object.entries(session.modules)) {
+    const module = ctx.getModule(moduleName);
+    if (!module) continue;
+
+    const status = await getGitStatus(module.absolutePath);
+    if (status.clean) continue;
+
+    const spinner = ctx.output.spinner(`${moduleName}: stashing`);
+    spinner.start();
+
+    try {
+      if (ctx.dryRun) {
+        spinner.info(`[dry-run] Would stash changes`);
+        stashedCount++;
+        continue;
+      }
+
+      let cmd = `git stash push -m "${stashMessage}"`;
+      if (options.includeUntracked) cmd += ' -u';
+
+      const stashResult = await exec(cmd, { cwd: module.absolutePath, silent: true });
+      if (!stashResult.success) {
+        spinner.fail(`${moduleName}: stash failed`);
+        if (stashResult.stderr) {
+          ctx.output.error(`  ${stashResult.stderr}`);
+        }
+        continue;
+      }
+      spinner.succeed(`${moduleName}: stashed`);
+      stashedCount++;
+    } catch (error) {
+      spinner.fail(`${moduleName}: stash failed`);
+      if (ctx.verbose && error instanceof Error) {
+        ctx.output.error(`  ${error.message}`);
+      }
+    }
+  }
+
+  if (stashedCount === 0) {
+    ctx.output.info('No changes to stash');
+  }
+
+  // Step 2: Checkout default local branches
+  ctx.output.newline();
+  ctx.output.subheader('Checking out default branches');
+
+  for (const [moduleName] of Object.entries(session.modules)) {
+    const module = ctx.getModule(moduleName);
+    if (!module) continue;
+
+    const defaultBranch = module.branches?.local ??
+      ctx.config.defaults.branches?.local ??
+      'main';
+
+    const spinner = ctx.output.spinner(`${moduleName}: checkout ${defaultBranch}`);
+    spinner.start();
+
+    try {
+      if (ctx.dryRun) {
+        spinner.info(`[dry-run] Would checkout ${defaultBranch}`);
+        continue;
+      }
+
+      const checkoutResult = await exec(`git checkout ${defaultBranch}`, {
+        cwd: module.absolutePath,
+        silent: true,
+      });
+      if (!checkoutResult.success) {
+        spinner.fail(`${moduleName}: failed to checkout ${defaultBranch}`);
+        if (checkoutResult.stderr) {
+          ctx.output.error(`  ${checkoutResult.stderr}`);
+        }
+        continue;
+      }
+      spinner.succeed(`${moduleName}: on ${defaultBranch}`);
+    } catch (error) {
+      spinner.fail(`${moduleName}: checkout failed`);
+      if (ctx.verbose && error instanceof Error) {
+        ctx.output.error(`  ${error.message}`);
+      }
+    }
+  }
+
+  // Step 3: Update session status and clear active session
+  if (!ctx.dryRun) {
+    session.status = 'paused';
+    ctx.state.activeSession = undefined;
+    await ctx.saveState();
+  }
+
+  ctx.output.newline();
+  ctx.output.success(`Session '${sessionName}' paused`);
+  ctx.output.info('Resume with: jic session resume');
+}
+
+// ============================================================================
+// Session Resume
+// ============================================================================
+
+async function sessionResume(
+  ctx: IExecutionContext,
+  name: string | undefined
+): Promise<void> {
+  // Find session to resume
+  let sessionName = name;
+
+  if (!sessionName) {
+    // Look for paused session
+    const pausedSession = Object.entries(ctx.state.sessions ?? {})
+      .find(([, s]) => s.status === 'paused');
+
+    if (pausedSession) {
+      sessionName = pausedSession[0];
+    } else if (ctx.state.activeSession) {
+      sessionName = ctx.state.activeSession;
+    }
+  }
+
+  if (!sessionName) {
+    throw new SessionError('No paused session to resume. Specify session name.');
+  }
+
+  const session = ctx.state.sessions?.[sessionName];
+  if (!session) {
+    throw new SessionError(`Session '${sessionName}' not found`);
+  }
+
+  if (session.status !== 'paused' && session.status !== 'active') {
+    throw new SessionError(`Session '${sessionName}' cannot be resumed (status: ${session.status})`);
+  }
+
+  ctx.output.header(`Resume Session: ${sessionName}`);
+
+  // Step 1: Checkout session branches
+  ctx.output.subheader('Checking out session branches');
+
+  for (const [moduleName, moduleSession] of Object.entries(session.modules)) {
+    const module = ctx.getModule(moduleName);
+    if (!module) continue;
+
+    const spinner = ctx.output.spinner(`${moduleName}: checkout ${moduleSession.branch}`);
+    spinner.start();
+
+    try {
+      // Check for uncommitted changes
+      const status = await getGitStatus(module.absolutePath);
+      if (!status.clean) {
+        spinner.warn(`${moduleName}: has uncommitted changes, skipping`);
+        continue;
+      }
+
+      if (ctx.dryRun) {
+        spinner.info(`[dry-run] Would checkout ${moduleSession.branch}`);
+        continue;
+      }
+
+      const checkoutResult = await exec(`git checkout ${moduleSession.branch}`, {
+        cwd: module.absolutePath,
+        silent: true,
+      });
+      if (!checkoutResult.success) {
+        spinner.fail(`${moduleName}: failed to checkout ${moduleSession.branch}`);
+        if (checkoutResult.stderr) {
+          ctx.output.error(`  ${checkoutResult.stderr}`);
+        }
+        continue;
+      }
+      spinner.succeed(`${moduleName}: on ${moduleSession.branch}`);
+    } catch (error) {
+      spinner.fail(`${moduleName}: checkout failed`);
+      if (ctx.verbose && error instanceof Error) {
+        ctx.output.error(`  ${error.message}`);
+      }
+    }
+  }
+
+  // Step 2: Pop stashes that match this session
+  ctx.output.newline();
+  ctx.output.subheader('Restoring stashed changes');
+
+  const stashPrefix = `jic-session-pause:${sessionName}:`;
+  let restoredCount = 0;
+
+  for (const [moduleName] of Object.entries(session.modules)) {
+    const module = ctx.getModule(moduleName);
+    if (!module) continue;
+
+    try {
+      // Check if there's a matching stash
+      const listResult = await exec('git stash list', {
+        cwd: module.absolutePath,
+        silent: true,
+      });
+
+      const stashes = listResult.stdout?.trim().split('\n').filter(Boolean) ?? [];
+      const matchingStash = stashes.find((s) => s.includes(stashPrefix));
+
+      if (!matchingStash) continue;
+
+      const spinner = ctx.output.spinner(`${moduleName}: restoring stash`);
+      spinner.start();
+
+      if (ctx.dryRun) {
+        spinner.info(`[dry-run] Would pop stash`);
+        restoredCount++;
+        continue;
+      }
+
+      // Get stash index
+      const stashMatch = matchingStash.match(/^(stash@\{\d+\})/);
+      if (stashMatch) {
+        await exec(`git stash pop ${stashMatch[1]}`, {
+          cwd: module.absolutePath,
+          silent: true,
+        });
+        spinner.succeed(`${moduleName}: restored`);
+        restoredCount++;
+      }
+    } catch (error) {
+      ctx.output.warning(`${moduleName}: failed to restore stash (conflict?)`);
+    }
+  }
+
+  if (restoredCount === 0) {
+    ctx.output.info('No stashes to restore');
+  }
+
+  // Step 3: Update session status
+  if (!ctx.dryRun) {
+    session.status = 'active';
+    ctx.state.activeSession = sessionName;
+    await ctx.saveState();
+  }
+
+  ctx.output.newline();
+  ctx.output.success(`Session '${sessionName}' resumed`);
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
 async function checkBranchExists(module: ResolvedModule, branch: string): Promise<boolean> {
-  try {
-    await exec(`git show-ref --verify --quiet refs/heads/${branch}`, {
-      cwd: module.absolutePath,
-      silent: true,
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  const result = await exec(`git show-ref --verify --quiet refs/heads/${branch}`, {
+    cwd: module.absolutePath,
+    silent: true,
+  });
+  return result.success;
 }
