@@ -311,7 +311,6 @@ async function deployModule(
     });
   }
 
-  ctx.getAwsConfig(env); // Validate AWS config exists
   const startTime = Date.now();
 
   ctx.output.subheader(`Deploying ${module.name}`);

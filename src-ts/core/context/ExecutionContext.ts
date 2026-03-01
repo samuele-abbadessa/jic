@@ -210,7 +210,7 @@ export class ExecutionContext implements IExecutionContext {
    */
   getAwsConfig(env?: Environment): AwsEnvironmentConfig {
     const targetEnv = env ?? this.env;
-    const awsConfig = this.config.aws;
+    const awsConfig = this.config.aws ?? {};
 
     const envConfig = awsConfig[targetEnv as keyof typeof awsConfig] ?? {};
 
