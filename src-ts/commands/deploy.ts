@@ -1457,10 +1457,12 @@ async function deployFrontend(
   ctx: IExecutionContext,
   options: DeployOptions & { invalidate?: boolean }
 ): Promise<void> {
-  const frontendModule = ctx.getModule('joyincloud-gw-client');
-  if (!frontendModule) {
-    throw new DeployError('Frontend module not found');
+  // Find the first frontend module in the project
+  const frontendModules = Object.values(ctx.config.resolvedModules).filter((m) => m.type === 'frontend');
+  if (frontendModules.length === 0) {
+    throw new DeployError('No frontend module found in project configuration');
   }
+  const frontendModule = frontendModules[0];
 
   const env = ctx.env;
   await deployS3CloudFront(ctx, frontendModule, env, options);

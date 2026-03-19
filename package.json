@@ -1,7 +1,7 @@
 {
   "name": "jic-cli",
   "version": "2.0.0-alpha.1",
-  "description": "JoyInCloud Development Workflow CLI - Multi-module project management for microservices",
+  "description": "Multi-module project management CLI for microservices",
   "main": "dist/index.js",
   "bin": {
     "jic": "./dist/index.js"
@@ -34,7 +34,7 @@
     "workflow",
     "typescript"
   ],
-  "author": "Samuele",
+  "author": "Angelo Samuele Abbadessa",
   "license": "MIT",
   "dependencies": {
     "@types/blessed": "^0.1.27",

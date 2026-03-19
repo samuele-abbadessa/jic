@@ -630,8 +630,7 @@ async function lambdaList(
     // Filter to our functions - either configured or matching naming convention
     const ourFunctions = functions.filter((f) =>
       configuredFunctions.has(f.FunctionName) ||
-      f.FunctionName.startsWith('jic-') ||
-      f.FunctionName.startsWith('joyincloud-')
+      f.FunctionName.startsWith('jic-')
     );
 
     if (ourFunctions.length === 0) {

@@ -578,7 +578,7 @@ async function infraStatus(ctx: IExecutionContext): Promise<void> {
 
 async function showInfraStatus(ctx: IExecutionContext): Promise<void> {
   const services = [
-    { name: 'MongoDB', port: 27017, check: 'docker exec joyincloud_mongodb mongosh --eval "db.runCommand({ping:1})"', core: true },
+    { name: 'MongoDB', port: 27017, check: 'mongosh --eval "db.runCommand({ping:1})" --quiet', core: true },
     { name: 'Eureka', port: 8761, check: 'curl -sf http://localhost:8761/actuator/health', core: true },
     { name: 'LocalStack', port: 4566, check: 'curl -sf http://localhost:4566/_localstack/health', core: false },
   ];

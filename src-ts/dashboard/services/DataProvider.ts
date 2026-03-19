@@ -82,7 +82,7 @@ export class DataProvider {
     try {
       const start = Date.now();
       await exec(
-        'docker exec joyincloud_mongodb mongosh --eval "db.runCommand({ping:1})" --quiet',
+        'mongosh --eval "db.runCommand({ping:1})" --quiet',
         { silent: true, timeout: 5000 }
       );
       const latency = Date.now() - start;

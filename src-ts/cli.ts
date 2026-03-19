@@ -15,7 +15,7 @@ export function createProgram(version: string): Command {
 
   program
     .name('jic')
-    .description('JoyInCloud Development Workflow CLI - Multi-module project management')
+    .description('Multi-module project management CLI for microservices')
     .version(version, '-v, --version', 'Output the current version');
 
   // Global options

@@ -33,7 +33,7 @@ async function execInModuleOrThrow(
 
 /**
  * Maven repository cache path for a given module.
- * Flux clients use groupId: it.keyover.joyincloud
+ * TODO: Make groupId configurable via build config (currently hardcoded)
  */
 function getMavenCachePath(moduleName: string): string {
   return join(
