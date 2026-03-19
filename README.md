@@ -11,6 +11,8 @@ A command-line tool for managing multi-module microservices projects. Provides u
 - **Kubernetes Management**: Namespace, deployment, and pod operations
 - **Session Management**: Track work sessions across related modules with branch management
 - **Vendor Support**: Multi-client vendor-branch workflows with git submodules
+- **Project Init**: Initialize new projects with `jic init`
+- **Module Discovery**: Auto-detect module types from filesystem
 - **Dashboard**: Terminal UI for monitoring services and logs
 - **Code Search**: Search across all modules with pattern matching
 
@@ -32,6 +34,9 @@ npm link
 ## Quick Start
 
 ```bash
+# Initialize a new project
+jic init --yes
+
 # Show project status
 jic status
 
@@ -131,6 +136,23 @@ jic vendor remove <module>               # Remove module from vendor
 jic vendor sync                          # Merge master into vendor branches
 ```
 
+### Init Command
+
+```bash
+jic init                                 # Initialize project (interactive)
+jic init --yes                           # Auto-init (dir name + submodules type)
+jic init --name myproject --type independent  # Non-interactive
+jic init --force                         # Overwrite existing config
+```
+
+### Module Commands
+
+```bash
+jic module discovery                     # Scan subdirectories and add to config
+jic module config <module> get <key>     # Read config value (dot-path)
+jic module config <module> set <key> <value>  # Write config value
+```
+
 ### AWS Commands
 
 ```bash
@@ -217,6 +239,8 @@ Configuration is stored in `jic.config.json` in the project root:
 | `node-service` | Node.js services (npm build, Docker deploy) |
 | `lambda-layer` | AWS Lambda shared dependency layers |
 | `lambda-functions` | AWS Lambda function bundles |
+| `dotnet-service` | C#/.NET services |
+| `unknown` | Unrecognized module type (added by discovery) |
 
 ### Project Types
 

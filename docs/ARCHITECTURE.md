@@ -72,7 +72,8 @@ src-ts/
 │   └── utils/               # Utilities
 │       ├── output.ts        # Console output, spinners, tables
 │       ├── shell.ts         # Command execution, git utilities
-│       └── submodule.ts     # Git submodule & root repo operations
+│       ├── submodule.ts     # Git submodule & root repo operations
+│       └── module-detector.ts # Module type detection from filesystem
 │
 ├── pipeline/                # Pipeline system
 │   ├── Phase.ts             # Phase interface & base class
@@ -83,6 +84,8 @@ src-ts/
 └── commands/                # Command implementations
     ├── build.ts             # Build command
     ├── git.ts               # Git command
+    ├── init.ts              # Project initialization
+    ├── module.ts            # Module discovery and config
     └── vendor.ts            # Vendor command
 ```
 

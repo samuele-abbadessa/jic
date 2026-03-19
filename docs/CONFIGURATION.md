@@ -310,10 +310,12 @@ JIC CLI supports the following module types with built-in defaults:
 |------|-------------|-------|-------|
 | `java-service` | Spring Boot services | Maven | Spring Boot run |
 | `flux-client` | WebClient libraries | Maven | - |
-| `frontend` | Angular application | npm | ng serve |
+| `frontend` | Frontend application (Angular, React, Vue, TanStack) | npm | ng serve |
 | `node-service` | Node.js services | npm | npm start |
 | `lambda-layer` | AWS Lambda layers | zip | - |
 | `lambda-functions` | AWS Lambda functions | zip | - |
+| `dotnet-service` | C#/.NET services | dotnet | dotnet run |
+| `unknown` | Unrecognized (auto-detected) | - | - |
 
 ### Built-in Defaults
 
