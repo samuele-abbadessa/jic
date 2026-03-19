@@ -320,6 +320,9 @@ export interface DefaultsConfig {
       prod?: Partial<KubernetesDeployConfig>;
     };
   };
+
+  /** Default environment variables to inject into module processes */
+  env?: Record<string, string>;
 }
 
 // ============================================================================
@@ -457,6 +460,8 @@ export interface BuildOrderEntry {
 // Project Configuration
 // ============================================================================
 
+export type ProjectType = 'independent' | 'submodules';
+
 /**
  * Project metadata
  */
@@ -467,6 +472,8 @@ export interface ProjectConfig {
   description?: string;
   /** Root directory (usually ".") */
   rootDir: string;
+  /** Project type: 'independent' (default) or 'submodules' (vendor system) */
+  type?: ProjectType;
 }
 
 // ============================================================================
