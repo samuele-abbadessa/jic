@@ -13,3 +13,4 @@ export * from './aws.js';
 export * from './clean.js';
 export * from './search.js';
 export * from './k8s.js';
+export * from './vendor.js';

@@ -1,5 +1,5 @@
 /**
- * JIC CLI - JoyInCloud Development Workflow CLI
+ * JIC CLI - Multi-module project management CLI
  *
  * A comprehensive CLI tool for managing multi-module microservices projects.
  * Handles git operations, builds, deployments, and AWS resource management.
@@ -25,6 +25,7 @@ import {
   registerCleanCommand,
   registerSearchCommand,
   registerKubernetesCommand,
+  registerVendorCommand,
 } from './commands/index.js';
 import { registerDashboardCommand } from './dashboard/index.js';
 
@@ -406,6 +407,7 @@ async function main(): Promise<void> {
     registerCleanCommand(program, createCtx);
     registerSearchCommand(program, createCtx);
     registerKubernetesCommand(program, createCtx);
+    registerVendorCommand(program, createCtx);
     registerDashboardCommand(program, createCtx);
 
     // Add status command
