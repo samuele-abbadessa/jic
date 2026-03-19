@@ -372,6 +372,10 @@ export interface KubernetesEnvironmentConfig {
   registry?: string;
   /** Default namespace */
   namespace?: string;
+  /** Path to k8s manifests directory (default: k8s/) */
+  manifestsDir?: string;
+  /** Name of the infra subdirectory (default: infra/) */
+  infraDir?: string;
 }
 
 /**

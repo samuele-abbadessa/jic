@@ -18,6 +18,8 @@ import type { DeploymentRecord } from '../core/types/state.js';
 import { KubernetesError, withErrorHandling } from '../core/errors/index.js';
 import { exec, getGitCommit } from '../core/utils/shell.js';
 import { colors } from '../core/utils/output.js';
+import path from 'path';
+import fs from 'fs';
 
 // ============================================================================
 // Helpers
@@ -135,6 +137,19 @@ export function registerKubernetesCommand(
       withErrorHandling(async () => {
         const ctx = await createContext();
         await k8sRefresh(ctx);
+      })
+    );
+
+  // Apply command
+  k8s
+    .command('apply')
+    .description('Apply Kubernetes manifests from local k8s directory')
+    .option('--namespace <ns>', 'Apply only manifests for a specific namespace')
+    .option('--no-infra', 'Skip applying infrastructure manifests')
+    .action(
+      withErrorHandling(async (options: { namespace?: string; infra?: boolean }) => {
+        const ctx = await createContext();
+        await k8sApply(ctx, options);
       })
     );
 }
@@ -641,4 +656,99 @@ async function k8sRefresh(ctx: IExecutionContext): Promise<void> {
 
   ctx.output.newline();
   ctx.output.success(`Refresh complete: ${added} added, ${updated} updated, ${unchanged} unchanged`);
+}
+
+// ============================================================================
+// Kubernetes Apply
+// ============================================================================
+
+async function k8sApply(
+  ctx: IExecutionContext,
+  options: { namespace?: string; infra?: boolean }
+): Promise<void> {
+  const k8sConfig = ctx.getK8sConfig();
+  const kubectlBase = buildKubectlBase(ctx);
+  const manifestsDir = path.resolve(ctx.projectRoot, k8sConfig.manifestsDir ?? 'k8s');
+  const infraDirName = k8sConfig.infraDir ?? 'infra';
+  const infraDir = path.join(manifestsDir, infraDirName);
+  const applyInfra = options.infra !== false;
+
+  ctx.output.header(`Kubernetes Apply: ${ctx.env}`);
+
+  // Validate manifests directory exists
+  if (!fs.existsSync(manifestsDir)) {
+    throw new KubernetesError(`Manifests directory not found: ${manifestsDir}`);
+  }
+
+  // Collect directories to apply
+  const dirsToApply: Array<{ name: string; path: string }> = [];
+
+  // Add infra first (unless --no-infra)
+  if (applyInfra && fs.existsSync(infraDir) && !options.namespace) {
+    dirsToApply.push({ name: infraDirName, path: infraDir });
+  }
+
+  // Get namespace directories (everything in manifestsDir except infraDir)
+  const entries = fs.readdirSync(manifestsDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === infraDirName) continue;
+
+    // If --namespace is specified, only include that one
+    if (options.namespace && entry.name !== options.namespace) continue;
+
+    dirsToApply.push({ name: entry.name, path: path.join(manifestsDir, entry.name) });
+  }
+
+  if (dirsToApply.length === 0) {
+    ctx.output.warning('No manifests to apply');
+    return;
+  }
+
+  ctx.output.keyValue('Manifests dir', manifestsDir);
+  ctx.output.keyValue('Directories', dirsToApply.map((d) => d.name).join(', '));
+  ctx.output.newline();
+
+  // Apply each directory
+  for (const dir of dirsToApply) {
+    // Check if directory has YAML files
+    const yamlFiles = fs.readdirSync(dir.path).filter(
+      (f) => f.endsWith('.yaml') || f.endsWith('.yml')
+    );
+
+    if (yamlFiles.length === 0) {
+      ctx.output.warning(`No YAML files in ${dir.name}/, skipping`);
+      continue;
+    }
+
+    const spinner = ctx.output.spinner(`Applying ${dir.name}/ (${yamlFiles.length} files)`);
+    spinner.start();
+
+    try {
+      if (ctx.dryRun) {
+        spinner.info(`[dry-run] Would apply ${dir.name}/: ${yamlFiles.join(', ')}`);
+        continue;
+      }
+
+      const result = await exec(
+        `${kubectlBase} apply -f ${dir.path}`,
+        { silent: true }
+      );
+
+      // Show what was applied
+      const applied = (result.stdout ?? '').trim().split('\n').filter(Boolean);
+      spinner.succeed(`Applied ${dir.name}/ (${applied.length} resources)`);
+
+      for (const line of applied) {
+        ctx.output.log(`  ${colors.muted(line)}`);
+      }
+    } catch (error) {
+      spinner.fail(`Failed to apply ${dir.name}/`);
+      throw new KubernetesError(`Failed to apply ${dir.name}/: ${error}`, {
+        operation: 'apply',
+      });
+    }
+  }
+
+  ctx.output.newline();
+  ctx.output.success('All manifests applied successfully');
 }

@@ -88,7 +88,7 @@ _jic_completions() {
       return
       ;;
     k8s)
-      local k8s_cmds="status logs restart scale pods refresh"
+      local k8s_cmds="status logs restart scale pods refresh apply"
       COMPREPLY=($(compgen -W "\${k8s_cmds}" -- "\${cur}"))
       return
       ;;
@@ -233,6 +233,7 @@ _jic() {
             'scale:Scale deployment'
             'pods:List pods'
             'refresh:Sync local state'
+            'apply:Apply manifests to cluster'
           )
           _describe -t k8s-commands 'k8s command' k8s_cmds
           ;;
@@ -332,6 +333,7 @@ complete -c jic -n "__fish_seen_subcommand_from k8s" -a "restart" -d "Restart de
 complete -c jic -n "__fish_seen_subcommand_from k8s" -a "scale" -d "Scale deployment"
 complete -c jic -n "__fish_seen_subcommand_from k8s" -a "pods" -d "List pods"
 complete -c jic -n "__fish_seen_subcommand_from k8s" -a "refresh" -d "Sync local state"
+complete -c jic -n "__fish_seen_subcommand_from k8s" -a "apply" -d "Apply manifests"
 
 # Deploy subcommands
 complete -c jic -n "__fish_seen_subcommand_from deploy" -a "run" -d "Deploy modules"
