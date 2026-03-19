@@ -9,6 +9,7 @@ JIC CLI looks for configuration in the following locations (in order):
 1. Path specified with `--config` flag
 2. `jic.config.json` in current directory
 3. `jic.config.json` in parent directories (up to git root)
+4. `.jic/vendors/jic.config.<vendor>.json` for vendor-specific config (when `project.type: "submodules"`)
 
 ## Configuration Inheritance
 
@@ -17,11 +18,14 @@ The key feature of v2.0 is configuration inheritance. Instead of repeating the s
 ### Inheritance Chain
 
 ```
-Built-in Defaults → Config Defaults → Module Config → CLI Options
-       ↓                  ↓                ↓              ↓
-   (hardcoded)      (jic.config.json    (per module)   (runtime)
-                     defaults section)
+Built-in Defaults → Config Defaults → Vendor Config → Module Config → CLI Options
+       ↓                  ↓                ↓              ↓              ↓
+   (hardcoded)      (jic.config.json  (.jic/vendors/  (per module)   (runtime)
+                     defaults section) jic.config.
+                                      <vendor>.json)
 ```
+
+Vendor config is only active when `project.type` is `"submodules"`. For `"independent"` projects (default), this layer is skipped.
 
 ### Example: Before vs After
 
@@ -29,15 +33,15 @@ Built-in Defaults → Config Defaults → Module Config → CLI Options
 ```json
 {
   "modules": {
-    "joyincloud-gw-server": {
+    "api-server": {
       "type": "java-service",
-      "directory": "joyincloud-gw-server",
-      "aliases": ["gws", "gateway"],
+      "directory": "api-server",
+      "aliases": ["api", "gateway"],
       "port": 8080,
       "build": {
         "command": "mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
         "dockerCommand": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true",
-        "dockerImage": "localhost:5000/joyincloudgatewayserver"
+        "dockerImage": "localhost:5000/api-server"
       },
       "serve": {
         "command": "mvn -q -DskipTests spring-boot:run -Dspring-boot.run.profiles=dev",
@@ -45,15 +49,15 @@ Built-in Defaults → Config Defaults → Module Config → CLI Options
         "startupTimeout": 80000
       }
     },
-    "joyincloud-tenant-mainservice": {
+    "user-service": {
       "type": "java-service",
-      "directory": "joyincloud-tenant-mainservice",
-      "aliases": ["tms"],
+      "directory": "user-service",
+      "aliases": ["us"],
       "port": 8082,
       "build": {
         "command": "mvn clean install -amd -Pdev --batch-mode -DskipTests=true -Dmaven.test.skip=true",
         "dockerCommand": "mvn clean install jib:dockerBuild -amd -Pdev --batch-mode -DskipTests=true",
-        "dockerImage": "localhost:5000/joyincloudtenantmainservice"
+        "dockerImage": "localhost:5000/user-service"
       },
       "serve": {
         "command": "mvn -q -DskipTests spring-boot:run -Dspring-boot.run.profiles=dev",
@@ -70,8 +74,8 @@ Built-in Defaults → Config Defaults → Module Config → CLI Options
 {
   "defaults": {
     "branches": {
-      "local": "feature/samuele",
-      "dev": "origin/feature/samuele",
+      "local": "develop",
+      "dev": "origin/develop",
       "main": "origin/master"
     },
     "build": {
@@ -89,24 +93,24 @@ Built-in Defaults → Config Defaults → Module Config → CLI Options
     }
   },
   "modules": {
-    "joyincloud-gw-server": {
+    "api-server": {
       "type": "java-service",
-      "directory": "joyincloud-gw-server",
-      "aliases": ["gws", "gateway"],
+      "directory": "api-server",
+      "aliases": ["api", "gateway"],
       "port": 8080,
-      "build": { "dockerImage": "localhost:5000/joyincloudgatewayserver" }
+      "build": { "dockerImage": "localhost:5000/api-server" }
     },
-    "joyincloud-tenant-mainservice": {
+    "user-service": {
       "type": "java-service",
-      "directory": "joyincloud-tenant-mainservice",
-      "aliases": ["tms"],
+      "directory": "user-service",
+      "aliases": ["us"],
       "port": 8082,
-      "build": { "dockerImage": "localhost:5000/joyincloudtenantmainservice" }
+      "build": { "dockerImage": "localhost:5000/user-service" }
     },
-    "whatsapp-service-server": {
+    "messaging-service": {
       "type": "node-service",
-      "directory": "whatsapp-service-server",
-      "aliases": ["whatsapp", "wa"],
+      "directory": "messaging-service",
+      "aliases": ["msg"],
       "port": 3004,
       "branches": {
         "local": "rewrite",
@@ -118,7 +122,7 @@ Built-in Defaults → Config Defaults → Module Config → CLI Options
 }
 ```
 
-Note how `whatsapp-service-server` overrides the default branches while other modules inherit them.
+Note how `messaging-service` overrides the default branches while other modules inherit them from defaults.
 
 ## Configuration Schema
 
@@ -130,6 +134,7 @@ interface JicConfig {
   project?: {
     name?: string;
     description?: string;
+    type?: 'independent' | 'submodules';  // default: 'independent'
   };
 
   // Default settings per module type
@@ -171,6 +176,9 @@ interface DefaultsConfig {
 
   // Default failure handling strategy
   failStrategy: FailStrategy;
+
+  // Environment variables (can be overridden by vendor config)
+  env?: Record<string, string>;
 
   // Build defaults per module type
   build?: Partial<Record<ModuleType, Partial<BuildConfig>>>;
@@ -226,17 +234,17 @@ Modules can declare dependencies on other modules. When building with `--with-de
 ```json
 {
   "modules": {
-    "joyincloud-gw-server": {
+    "api-server": {
       "type": "java-service",
-      "directory": "joyincloud-gw-server",
+      "directory": "api-server",
       "dependencies": [
-        "jic-tenant-mainsvc-client-flux",
-        "jic-tenant-agenda-client-flux"
+        "user-service-client",
+        "booking-service-client"
       ]
     },
-    "jic-tenant-mainsvc-client-flux": {
+    "user-service-client": {
       "type": "flux-client",
-      "directory": "jic-tenant-mainsvc-client-flux"
+      "directory": "user-service-client"
     }
   }
 }
@@ -245,10 +253,10 @@ Modules can declare dependencies on other modules. When building with `--with-de
 Usage:
 ```bash
 # Build gws with its dependencies (flux clients first)
-jic build gws --with-deps
+jic build api --with-deps
 
 # Build flux client and all services that depend on it
-jic build jic-tenant-mainsvc-client-flux --dependants
+jic build user-service-client --dependants
 
 # Show dependency tree
 jic build --show-deps
@@ -364,20 +372,20 @@ Groups allow batch operations on related modules:
 {
   "groups": {
     "@backend": [
-      "joyincloud-gw-server",
-      "joyincloud-tenant-mainservice",
-      "joyincloud-tenant-agenda",
-      "joyincloud-tenant-notificationservice"
+      "api-server",
+      "user-service",
+      "booking-service",
+      "notification-service"
     ],
     "@flux": [
-      "jic-tenant-agenda-client-flux",
-      "jic-tenant-mainsvc-client-flux",
-      "whatsapp-service-client-flux"
+      "booking-service-client",
+      "user-service-client",
+      "messaging-service-client"
     ],
-    "@frontend": ["joyincloud-gw-client"],
+    "@frontend": ["frontend"],
     "@minServe": [
-      "joyincloud-gw-server",
-      "joyincloud-tenant-mainservice"
+      "api-server",
+      "user-service"
     ]
   }
 }
@@ -389,6 +397,71 @@ jic build @backend          # Build all backend services
 jic git status @flux        # Git status for flux clients
 jic serve @minServe         # Start minimal service set
 ```
+
+## Vendor Configuration
+
+For projects with `project.type: "submodules"`, vendor configuration files define per-client customizations.
+
+### File Location
+
+Vendor configs are stored in `.jic/vendors/jic.config.<vendor>.json`. The active vendor is tracked in `jic.state.json` via the `activeVendor` field (defaults to `"root"`).
+
+### Vendor Config Schema
+
+```typescript
+interface VendorConfig {
+  description?: string;
+  modules: string[];              // Module names from root config (acts as filter)
+  branches: {
+    master: string;               // e.g., "acme/master"
+    dev: string;                  // e.g., "acme/dev"
+    build: string;                // e.g., "acme/build"
+  };
+  nonVendorBranch?: string;       // Branch for non-vendor modules (default: "master")
+  env?: Record<string, string>;   // Vendor-specific environment variables
+  aws?: Partial<AwsConfig>;       // AWS overrides (deep-merged)
+  kubernetes?: Partial<KubernetesConfig>; // K8s overrides (deep-merged)
+}
+```
+
+### Example
+
+```json
+{
+  "description": "Acme Corp customization",
+  "modules": ["service-a", "frontend"],
+  "branches": {
+    "master": "acme/master",
+    "dev": "acme/dev",
+    "build": "acme/build"
+  },
+  "nonVendorBranch": "master",
+  "env": {
+    "API_URL": "https://acme.example.com/api",
+    "THEME": "acme"
+  }
+}
+```
+
+### The "root" Vendor
+
+The `root` vendor is the default. It includes all modules with standard branch names (`master`, `dev`, `build`). Generated by `jic vendor create root` or automatically when no vendor is set.
+
+### Merge Rules
+
+- **`modules`**: Filters which modules are visible to commands. Creates implicit `@<vendor>` group.
+- **`env`**: Deep-merged with `defaults.env` (vendor values override root values)
+- **`aws`, `kubernetes`**: Deep-merged with root config
+- **Module resolution**: `resolveModules([])` returns only vendor modules. Group references (`@backend`) are intersected with vendor modules. Explicit module references outside vendor throw `VendorError`.
+
+### Implicit Groups
+
+Each vendor automatically creates a group `@<vendorName>` containing its modules:
+```bash
+jic build @acme          # Build all modules in the acme vendor
+```
+
+Existing groups (`@backend`, `@frontend`) are intersected with the active vendor's modules.
 
 ## AWS Configuration
 
@@ -427,22 +500,26 @@ JIC CLI maintains state in `jic.state.json`:
   "version": "2.0.0",
   "lastUpdated": "2024-01-15T12:00:00Z",
   "activeSession": "myFeature",
+  "activeVendor": "acme",
   "sessions": {
     "myFeature": {
       "name": "myFeature",
       "description": "My feature description",
       "status": "active",
       "createdAt": "2024-01-15T10:00:00Z",
-      "baseBranch": "feature/samuele",
+      "baseBranch": "develop",
       "sessionBranch": "feature/myFeature",
+      "vendor": "acme",
+      "rootBranch": "acme/feature/myFeature",
+      "rootBaseBranch": "acme/dev",
       "modules": {
-        "joyincloud-gw-server": {
+        "api-server": {
           "branch": "feature/myFeature",
-          "baseBranch": "feature/samuele"
+          "baseBranch": "develop"
         },
-        "joyincloud-tenant-mainservice": {
+        "user-service": {
           "branch": "feature/myFeature",
-          "baseBranch": "feature/samuele"
+          "baseBranch": "develop"
         }
       },
       "mergedBranches": []
@@ -450,8 +527,8 @@ JIC CLI maintains state in `jic.state.json`:
   },
   "deployments": {
     "dev": {
-      "joyincloud-gw-server": {
-        "moduleName": "joyincloud-gw-server",
+      "api-server": {
+        "moduleName": "api-server",
         "environment": "dev",
         "version": "3.07",
         "commit": "abc123",
@@ -466,7 +543,7 @@ JIC CLI maintains state in `jic.state.json`:
         "deployedAt": "2024-01-15T12:00:00Z",
         "status": "deployed",
         "functions": {
-          "importClienti": {
+          "importData": {
             "version": "1.01",
             "lambdaVersion": "2",
             "deployedAt": "2024-01-15T12:00:00Z"
@@ -536,11 +613,13 @@ jic build --skip-frontend     # Skip frontend build
 When a command runs, configuration is resolved in this order:
 
 1. **Load base config**: Read `jic.config.json`
-2. **Apply built-in defaults**: Merge hardcoded defaults for each module type
-3. **Apply config defaults**: Merge `defaults` section per module type
-4. **Apply module config**: Merge module-specific overrides
-5. **Resolve paths**: Convert relative paths to absolute
-6. **Apply CLI options**: Override with command-line flags
+2. **Load state**: Read `jic.state.json` (includes `activeVendor`)
+3. **Load vendor config** (if `project.type: "submodules"`): Read `.jic/vendors/jic.config.<activeVendor>.json`
+4. **Apply built-in defaults**: Merge hardcoded defaults for each module type
+5. **Apply config defaults**: Merge `defaults` section per module type
+6. **Apply module config**: Merge module-specific overrides
+7. **Resolve paths**: Convert relative paths to absolute
+8. **Apply CLI options**: Override with command-line flags
 
 The result is a `ResolvedModule` with all settings computed:
 

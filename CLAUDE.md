@@ -90,12 +90,21 @@ Terminal UI built with `blessed-contrib` in `src-ts/dashboard/`. Has its own lay
 
 For projects with `project.type: "submodules"`, the CLI supports vendor-branch distribution. Vendor is a configuration layer injected between root config and local overrides via `ExecutionContext`.
 
+**Config loading chain:** `jic.config.json → .jic/vendors/jic.config.<vendor>.json → jic.local.json`
+
 **New files:**
 - `core/types/vendor.ts` — `VendorConfig`, `VendorBranchConfig`, `LoadedVendorConfig` types
 - `core/config/vendor-schema.ts` — Zod validation schema for vendor configs
 - `core/config/vendor-loader.ts` — Load, list, save, generate vendor configs from `.jic/vendors/`
 - `core/utils/submodule.ts` — Git submodule helpers (`gitInRoot`, `stageSubmodulePointers`, etc.)
 - `commands/vendor.ts` — `jic vendor` command family
+
+**Vendor config** (`.jic/vendors/jic.config.<vendor>.json`):
+- `modules: string[]` — filter on root config modules, defines implicit `@<vendor>` group
+- `branches: { master, dev, build }` — vendor-specific branch names
+- `nonVendorBranch?: string` — branch for modules NOT in this vendor (default: `"master"`)
+- `env?: Record<string, string>` — vendor-specific environment variables
+- `aws?`, `kubernetes?` — deep-merge overrides
 
 **Vendor commands** (for `project.type: "submodules"` only):
 
@@ -109,7 +118,15 @@ For projects with `project.type: "submodules"`, the CLI supports vendor-branch d
 | `jic vendor remove <module>` | Remove module from vendor |
 | `jic vendor sync` | Merge master into vendor branches |
 
-**Integration:** Sessions are vendor-aware (branch naming `<vendor>/feature/<name>`, base branch `<vendor>/dev`). Git commands operate on root repo when `isSubmodules()`. `resolveModules()` automatically filters to vendor modules.
+**Module resolution with vendor:**
+- No refs → only vendor modules returned
+- Group refs (`@backend`) → silently intersected with vendor modules
+- Explicit module refs → `VendorError` if module is outside active vendor
+- Implicit `@<vendor>` group created automatically (e.g., `@acme`)
+
+**State:** `JicState.activeVendor` tracks the active vendor (default: `"root"`). `Session` has `vendor`, `rootBranch`, `rootBaseBranch` fields for vendor-aware sessions.
+
+**Integration:** Sessions use vendor-prefixed branches (`<vendor>/feature/<name>`, base: `<vendor>/dev`). Git commands operate on root repo when `isSubmodules()`. `jic git commit --update-root` commits submodule pointers.
 
 ## Key Technical Details
 

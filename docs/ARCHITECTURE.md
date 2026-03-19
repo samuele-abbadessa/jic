@@ -50,15 +50,18 @@ src-ts/
 │
 ├── core/                    # Core functionality
 │   ├── types/               # TypeScript interfaces
-│   │   ├── config.ts        # Configuration types
+│   │   ├── config.ts        # Configuration types (incl. ProjectType)
 │   │   ├── module.ts        # Module types
 │   │   ├── execution.ts     # Execution types
-│   │   └── state.ts         # State types
+│   │   ├── state.ts         # State types (incl. activeVendor)
+│   │   └── vendor.ts        # Vendor config types
 │   │
 │   ├── config/              # Configuration loading
 │   │   ├── loader.ts        # Config loading & resolution
 │   │   ├── defaults.ts      # Built-in defaults per module type
-│   │   └── merger.ts        # Deep merge utilities
+│   │   ├── merger.ts        # Deep merge utilities
+│   │   ├── vendor-schema.ts # Vendor config Zod schema
+│   │   └── vendor-loader.ts # Vendor config loading & generation
 │   │
 │   ├── context/             # Execution context
 │   │   └── ExecutionContext.ts
@@ -68,7 +71,8 @@ src-ts/
 │   │
 │   └── utils/               # Utilities
 │       ├── output.ts        # Console output, spinners, tables
-│       └── shell.ts         # Command execution, git utilities
+│       ├── shell.ts         # Command execution, git utilities
+│       └── submodule.ts     # Git submodule & root repo operations
 │
 ├── pipeline/                # Pipeline system
 │   ├── Phase.ts             # Phase interface & base class
@@ -78,7 +82,8 @@ src-ts/
 │
 └── commands/                # Command implementations
     ├── build.ts             # Build command
-    └── git.ts               # Git command
+    ├── git.ts               # Git command
+    └── vendor.ts            # Vendor command
 ```
 
 ## Core Concepts
@@ -114,6 +119,11 @@ interface IExecutionContext {
   isSessionActive(): boolean;
   getSessionModules(): ResolvedModule[] | null;
 
+  // Vendor (submodules projects)
+  readonly activeVendor: string | undefined;
+  readonly vendorConfig: LoadedVendorConfig | undefined;
+  isSubmodules(): boolean;
+
   // Output
   readonly output: Output;
 }
@@ -133,9 +143,9 @@ Each layer only needs to specify what differs from the previous layer. See [CONF
 
 Modules can be referenced by:
 
-- **Name**: `joyincloud-gw-server`
-- **Alias**: `gws`, `gateway`
-- **Group**: `@backend`, `@flux`
+- **Name**: `api-server`
+- **Alias**: `api`, `gateway`
+- **Group**: `@backend`, `@frontend`
 - **Type**: `--type java-service`
 
 When no modules are specified and a session is active, commands automatically use session modules (auto-scoping).
@@ -200,20 +210,45 @@ export function registerBuildCommand(
 }
 ```
 
+### 6. Vendor System (Submodules Projects)
+
+For projects with `project.type: "submodules"`, the vendor system adds a configuration layer between root config and local overrides:
+
+```
+jic.config.json → .jic/vendors/jic.config.<vendor>.json → jic.local.json → LoadedConfig
+```
+
+**Key concepts:**
+- **Vendor as context**: Vendor changes *what data* you work with, not *how*. Build, serve, deploy work unchanged.
+- **Module filtering**: `resolveModules()` in `ExecutionContext` filters to vendor modules. All commands respect vendor boundaries.
+- **Implicit groups**: Each vendor creates an `@<vendor>` group (e.g., `@acme`) containing its modules.
+- **Root repo**: Submodules projects have a root git repo. Git commands operate on it via `gitInRoot()`.
+- **Session integration**: Sessions use `<vendor>/feature/<name>` branches based off `<vendor>/dev`.
+- **Submodule pointers**: Updated at specific workflow moments (vendor checkout, sync, session start/end, `git commit --update-root`).
+
+**Files:**
+- `core/types/vendor.ts` — Type definitions
+- `core/config/vendor-schema.ts` — Zod validation
+- `core/config/vendor-loader.ts` — Config I/O
+- `core/utils/submodule.ts` — Root repo git operations
+- `commands/vendor.ts` — `jic vendor` commands
+
 ## Error Handling
 
 Errors follow a hierarchy with specific exit codes:
 
 ```typescript
-JicError (base)
-├── ConfigError     // Configuration issues
-├── BuildError      // Build failures
-├── DeployError     // Deployment failures
-├── GitError        // Git operation failures
-├── ServeError      // Service startup failures
-├── SessionError    // Session management errors
-├── AwsError        // AWS operation failures
-└── ValidationError // Input validation errors
+JicError (base, exit 1)
+├── ConfigError       (exit 2)  // Configuration issues
+├── BuildError        (exit 3)  // Build failures
+├── DeployError       (exit 4)  // Deployment failures
+├── AwsError          (exit 5)  // AWS operation failures
+├── GitError          (exit 6)  // Git operation failures
+├── ServeError        (exit 7)  // Service startup failures
+├── SessionError      (exit 8)  // Session management errors
+├── ValidationError   (exit 9)  // Input validation errors
+├── KubernetesError   (exit 10) // Kubernetes operation failures
+└── VendorError       (exit 11) // Vendor operation failures
 ```
 
 The `withErrorHandling` wrapper provides consistent error handling:
@@ -231,6 +266,7 @@ State is persisted in `jic.state.json`:
 ```typescript
 interface JicState {
   activeSession?: string;
+  activeVendor?: string;  // Active vendor for submodules projects
   sessions: Record<string, Session>;
   deployments: {
     dev: Record<string, DeploymentRecord>;
