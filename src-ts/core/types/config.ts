@@ -20,7 +20,9 @@ export type ModuleType =
   | 'frontend'
   | 'node-service'
   | 'lambda-layer'
-  | 'lambda-functions';
+  | 'lambda-functions'
+  | 'dotnet-service'
+  | 'unknown';
 
 /**
  * Deployment types
