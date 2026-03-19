@@ -18,6 +18,7 @@ import type { ResolvedModule } from '../core/types/module.js';
 import { GitError, withErrorHandling } from '../core/errors/index.js';
 import { exec, getGitBranch, getGitStatus, getGitCommit } from '../core/utils/shell.js';
 import { colors } from '../core/utils/output.js';
+import { gitInRoot, stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/submodule.js';
 
 // ============================================================================
 // Git Command Registration
@@ -402,8 +403,9 @@ export function registerGitCommand(
     .description('Add and commit all changes in session modules (session only)')
     .option('-m, --message <message>', 'Commit message (default: session description)')
     .option('-a, --amend', 'Amend the previous commit')
+    .option('--update-root', 'Also commit submodule pointer changes in root repo')
     .action(
-      withErrorHandling(async (options: { message?: string; amend?: boolean }) => {
+      withErrorHandling(async (options: { message?: string; amend?: boolean; updateRoot?: boolean }) => {
         const ctx = await createContext();
         await gitCommit(ctx, options);
       })
@@ -421,6 +423,24 @@ async function gitStatus(
 ): Promise<void> {
   const modules = resolveGitModules(ctx, moduleRefs, options);
   const showFiles = options.listFiles === true;
+
+  // Root repo status for submodules projects
+  if (ctx.isSubmodules()) {
+    ctx.output.info('Root repo:');
+    try {
+      const { stdout } = await gitInRoot(ctx.projectRoot, ['status', '--short']);
+      if (stdout.trim()) {
+        ctx.output.log(stdout);
+      } else {
+        ctx.output.log('  Clean');
+      }
+      const { stdout: branch } = await gitInRoot(ctx.projectRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      ctx.output.log(`  Branch: ${branch.trim()}`);
+    } catch {
+      ctx.output.log('  (unable to read root repo status)');
+    }
+    ctx.output.log('');
+  }
 
   if (ctx.json) {
     const statuses = await Promise.all(
@@ -867,6 +887,17 @@ async function gitFetch(
 ): Promise<void> {
   const modules = resolveGitModules(ctx, moduleRefs, options);
 
+  // Fetch root repo first for submodules projects
+  if (ctx.isSubmodules()) {
+    ctx.output.info('Fetching root repo...');
+    try {
+      await gitInRoot(ctx.projectRoot, ['fetch', '--all']);
+      ctx.output.success('  Root repo: fetched');
+    } catch {
+      ctx.output.warn('  Root repo: fetch failed');
+    }
+  }
+
   ctx.output.header('Git Fetch');
 
   let success = 0;
@@ -912,6 +943,17 @@ async function gitPull(
   options: { rebase?: boolean } & GitGlobalOptions
 ): Promise<void> {
   const modules = resolveGitModules(ctx, moduleRefs, options);
+
+  // Pull root repo first for submodules projects
+  if (ctx.isSubmodules()) {
+    ctx.output.info('Pulling root repo...');
+    try {
+      await gitInRoot(ctx.projectRoot, ['pull']);
+      ctx.output.success('  Root repo: pulled');
+    } catch {
+      ctx.output.warn('  Root repo: pull failed');
+    }
+  }
 
   ctx.output.header('Git Pull');
 
@@ -1020,6 +1062,21 @@ async function gitPush(
 
   ctx.output.newline();
   ctx.output.info(`Push complete: ${success} succeeded, ${failed} failed`);
+
+  // Push root repo last for submodules projects (after submodules)
+  if (ctx.isSubmodules()) {
+    ctx.output.info('Pushing root repo...');
+    try {
+      if (ctx.dryRun) {
+        ctx.output.info('  [dry-run] Would push root repo');
+      } else {
+        await gitInRoot(ctx.projectRoot, ['push']);
+        ctx.output.success('  Root repo: pushed');
+      }
+    } catch {
+      ctx.output.warn('  Root repo: push failed');
+    }
+  }
 }
 
 // ============================================================================
@@ -1662,6 +1719,17 @@ async function gitStashSave(
 
   ctx.output.newline();
   ctx.output.info(`Stash complete: ${success} succeeded, ${failed} failed`);
+
+  // Stash root repo for submodules projects
+  if (ctx.isSubmodules() && !ctx.dryRun) {
+    try {
+      const { stdout: rootStatus } = await gitInRoot(ctx.projectRoot, ['status', '--porcelain']);
+      if (rootStatus.trim()) {
+        await gitInRoot(ctx.projectRoot, ['stash', 'push', '-m', stashMessage]);
+        ctx.output.log('  Root repo: stashed');
+      }
+    } catch { /* nothing to stash */ }
+  }
 }
 
 async function gitStashPop(
@@ -1670,6 +1738,14 @@ async function gitStashPop(
   options: GitGlobalOptions
 ): Promise<void> {
   const modules = resolveGitModules(ctx, moduleRefs, options);
+
+  // Pop root repo stash first for submodules projects
+  if (ctx.isSubmodules() && !ctx.dryRun) {
+    try {
+      await gitInRoot(ctx.projectRoot, ['stash', 'pop']);
+      ctx.output.log('  Root repo: stash popped');
+    } catch { /* no stash */ }
+  }
 
   // Filter to only modules with stashes
   const modulesWithStashes: ResolvedModule[] = [];
@@ -1937,7 +2013,7 @@ async function gitSync(
 
 async function gitCommit(
   ctx: IExecutionContext,
-  options: { message?: string; amend?: boolean }
+  options: { message?: string; amend?: boolean; updateRoot?: boolean }
 ): Promise<void> {
   // Check if there's an active session
   if (!ctx.isSessionActive()) {
@@ -2039,6 +2115,24 @@ async function gitCommit(
 
   if (committed > 0) {
     ctx.output.info('Use "jic git push" to push changes to remote');
+  }
+
+  // Update root repo submodule pointers if requested
+  if (options.updateRoot && ctx.isSubmodules() && committed > 0 && !ctx.dryRun) {
+    ctx.output.newline();
+    const spinner = ctx.output.spinner('Updating submodule pointers in root repo');
+    spinner.start();
+    try {
+      const modulePaths = modules.map((m) => m.directory);
+      await stageSubmodulePointers(ctx.projectRoot, modulePaths);
+      await commitSubmodulePointers(ctx.projectRoot, modules.map((m) => m.name));
+      spinner.succeed('Submodule pointers updated in root repo');
+    } catch (error) {
+      spinner.fail('Failed to update submodule pointers');
+      if (ctx.verbose && error instanceof Error) {
+        ctx.output.error(`  ${error.message}`);
+      }
+    }
   }
 }
 
