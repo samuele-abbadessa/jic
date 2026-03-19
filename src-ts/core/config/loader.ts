@@ -359,6 +359,12 @@ export async function loadConfig(options: LoadOptions = {}): Promise<LoadedConfi
     }
   }
 
+  // Inject implicit @<vendorName> group
+  if (vendorConfig) {
+    mainConfig.groups = mainConfig.groups ?? {};
+    mainConfig.groups[`@${vendorConfig.name}`] = vendorConfig.modules;
+  }
+
   // Merge defaults: built-in <- config defaults
   const mergedDefaults = deepMerge<DefaultsConfig>(
     builtInDefaults,
