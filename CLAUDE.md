@@ -4,95 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-JIC CLI is a TypeScript command-line tool for managing multi-module microservices projects. It provides unified commands for git operations, builds, deployments, and AWS resource management across multiple submodules.
+JIC CLI is a TypeScript command-line tool for managing multi-module microservices projects. It provides unified commands for git operations, builds, deployments, and AWS/Kubernetes resource management across multiple submodules.
 
 **Version**: 2.0.0-alpha.1 (TypeScript rewrite)
 
 ## Build & Development Commands
 
 ```bash
-# Development with hot reload
-npm run dev
-
-# Build for production
-npm run build
-
-# Type checking
-npm run typecheck
-
-# Linting
-npm run lint
-npm run lint:fix
-
-# Testing
-npm test              # Watch mode
-npm run test:run      # Single run
-npm run test:coverage # With coverage
-
-# Format code
-npm run format
-
-# Link globally for testing
-npm link
+npm run dev              # Development with hot reload (tsx watch)
+npm run build            # Production build (tsup)
+npm run typecheck        # Type checking (tsc --noEmit)
+npm run lint             # ESLint
+npm run lint:fix         # ESLint with auto-fix
+npm run format           # Prettier formatting
+npm test                 # Vitest in watch mode
+npm run test:run         # Single test run
+npm run test:coverage    # With coverage
+npm link                 # Link globally as `jic` command
 ```
+
+Run a single test file: `npx vitest run src-ts/path/to/file.test.ts`
 
 ## Architecture
 
-```
-src-ts/
-├── index.ts                 # Entry point, shell completion generators
-├── cli.ts                   # Commander.js setup, global options
-├── core/
-│   ├── types/               # TypeScript interfaces
-│   │   ├── config.ts        # Configuration schema (JicConfig, ModuleConfig)
-│   │   ├── module.ts        # Resolved module types
-│   │   ├── execution.ts     # Pipeline and process types
-│   │   └── state.ts         # Persistent state (JicState)
-│   ├── config/
-│   │   ├── loader.ts        # Config loading, module resolution
-│   │   ├── defaults.ts      # Built-in defaults per module type
-│   │   └── merger.ts        # Deep merge utilities
-│   ├── context/
-│   │   └── ExecutionContext.ts  # Central context for all commands
-│   ├── errors/
-│   │   └── index.ts         # Error classes with exit codes
-│   └── utils/
-│       ├── output.ts        # Console output, spinners, tables
-│       ├── shell.ts         # Command execution, git utilities
-│       └── dependencies.ts  # Dependency graph, topological sort, cycle detection
-├── pipeline/
-│   ├── Phase.ts             # Phase interface
-│   ├── Pipeline.ts          # Multi-module orchestration
-│   └── phases/              # Build, Docker phases
-├── commands/                # Command implementations
-│   ├── build.ts, git.ts, deploy.ts, serve.ts
-│   ├── session.ts, aws.ts, clean.ts, search.ts
-│   └── index.ts             # Command exports
-└── dashboard/               # Terminal UI (blessed-contrib)
-    ├── Dashboard.ts         # Main dashboard orchestration
-    ├── layout/              # Layout manager and presets
-    └── components/          # Panel components
-```
+### Entry Flow
 
-## Key Concepts
+`src-ts/index.ts` → creates Commander program (`cli.ts`) → registers all commands → each command receives a context factory that lazily creates `ExecutionContext`.
 
-### ExecutionContext
+### Core Layers
 
-All commands receive an `IExecutionContext` providing:
-- **config**: Loaded and resolved configuration
-- **output**: Formatted console output (respects --quiet, --json, --verbose)
-- **getModule()/resolveModules()**: Module resolution by name, alias, or group
-- **activeSession**: Current work session
-- **getAwsConfig()**: Environment-specific AWS config
-
-### Configuration Inheritance
-
-Configuration flows: `Built-in Defaults → Config Defaults → Module Config → CLI Options`
-
-Modules can be referenced by:
-- Name: `joyincloud-gw-server`
-- Alias: `gws`, `gateway`
-- Group: `@backend`, `@flux`
+- **ExecutionContext** (`core/context/ExecutionContext.ts`): Central object passed to all commands. Provides config, module resolution, state management, output helpers, AWS/K8s config. All commands receive an `IExecutionContext`.
+- **Config Loader** (`core/config/loader.ts`): Loads `jic.config.json`, merges with `jic.local.json` overrides, loads `jic.state.json` runtime state. Discovers project root by walking up directories. Inheritance chain: Built-in defaults → Config defaults → Module config → Local overrides → Env vars.
+- **Pipeline** (`pipeline/Pipeline.ts`): Orchestrates multi-module operations through phases. Handles sequential/parallel execution, fail-fast/continue strategies, progress tracking. Used by build command.
+- **Output** (`core/utils/output.ts`): Formatted console output respecting `--quiet`, `--json`, `--verbose` flags. All user-visible output should go through `ctx.output`.
 
 ### Module Types
 
@@ -105,57 +49,15 @@ Modules can be referenced by:
 | `lambda-layer` | AWS Lambda layers |
 | `lambda-functions` | AWS Lambda functions |
 
-### Pipeline System
+### Module Resolution
 
-Pipelines orchestrate multi-module operations through phases:
-```typescript
-const pipeline = new Pipeline({
-  phases: [new BuildPhase()],
-  modules: resolvedModules,
-  failStrategy: ctx.failStrategy,
-});
-await pipeline.execute(ctx);
-```
+Modules can be referenced by name (`my-service`), alias (`ms`), group (`@backend`), or glob pattern (`svc-*`). Groups are defined in `jic.config.json`. Resolution logic is in `core/config/loader.ts` (`resolveModules`, `getModule`).
 
 ### Dependency System
 
-Modules can declare dependencies that must be built first:
-```typescript
-// In jic.config.json
-{
-  "joyincloud-gw-server": {
-    "type": "java-service",
-    "dependencies": ["jic-tenant-mainsvc-client-flux", "jic-tenant-agenda-client-flux"]
-  }
-}
-```
+`core/utils/dependencies.ts` provides DAG operations: `buildDependencyGraph()`, `topologicalSort()` (returns build levels), `detectCycles()`, `expandDependencies()`, `getDependants()`. Build flags: `--with-deps` (include dependencies), `--dependants` (include reverse deps), `--show-deps` (display tree without building), `--parallel` (parallelize within dependency levels, not across them).
 
-The dependency utilities (`src-ts/core/utils/dependencies.ts`) provide:
-- **buildDependencyGraph()**: Creates DAG from module dependencies
-- **topologicalSort()**: Returns build levels for correct ordering
-- **detectCycles()**: Detects circular dependencies
-- **expandDependencies()**: Expands modules to include their dependencies
-- **getDependants()**: Finds modules that depend on a given module
-- **getBuildOrder()**: Returns build levels respecting dependencies
-
-Build command options:
-- `--with-deps`: Include dependencies of specified modules
-- `--dependants`: Also build modules that depend on the specified modules
-- `--show-deps`: Display dependency tree without building
-- `--parallel`: Parallelize within dependency levels (not across them)
-
-### Error Handling
-
-Error hierarchy with specific exit codes:
-```
-JicError (1) → ConfigError (2), BuildError (3), DeployError (4),
-               AwsError (5), GitError (6), ServeError (7),
-               SessionError (8), ValidationError (9)
-```
-
-Use `withErrorHandling()` wrapper for consistent error handling in commands.
-
-## Adding New Commands
+### Adding a New Command
 
 1. Create `src-ts/commands/mycommand.ts`:
 ```typescript
@@ -169,18 +71,64 @@ export function registerMyCommand(
     .action(async (moduleRefs, options) => {
       const ctx = await createContext();
       const modules = ctx.resolveModules(moduleRefs);
-      // Implementation
+      // Implementation — use ctx.output for display
     });
 }
 ```
-
 2. Export from `src-ts/commands/index.ts`
 3. Register in `src-ts/index.ts`
 
+### Error Handling
+
+Error hierarchy in `core/errors/index.ts`: `JicError` (exit 1) → `ConfigError` (2), `BuildError` (3), `DeployError` (4), `AwsError` (5), `GitError` (6), `ServeError` (7), `SessionError` (8), `ValidationError` (9), `KubernetesError` (10), `VendorError` (11). Use `withErrorHandling()` wrapper for consistent error handling.
+
+### Dashboard
+
+Terminal UI built with `blessed-contrib` in `src-ts/dashboard/`. Has its own layout system with presets (default, logs-focused, monitoring) and panel components (ServiceMonitor, LogViewer, InfraStatus, QuickActions).
+
+### Vendor & Submodules Support
+
+For projects with `project.type: "submodules"`, the CLI supports vendor-branch distribution. Vendor is a configuration layer injected between root config and local overrides via `ExecutionContext`.
+
+**New files:**
+- `core/types/vendor.ts` — `VendorConfig`, `VendorBranchConfig`, `LoadedVendorConfig` types
+- `core/config/vendor-schema.ts` — Zod validation schema for vendor configs
+- `core/config/vendor-loader.ts` — Load, list, save, generate vendor configs from `.jic/vendors/`
+- `core/utils/submodule.ts` — Git submodule helpers (`gitInRoot`, `stageSubmodulePointers`, etc.)
+- `commands/vendor.ts` — `jic vendor` command family
+
+**Vendor commands** (for `project.type: "submodules"` only):
+
+| Command | Description |
+|---------|-------------|
+| `jic vendor list` | List available vendors |
+| `jic vendor status` | Show active vendor, modules, branches |
+| `jic vendor create <name>` | Create vendor config + branches |
+| `jic vendor checkout <name>` | Switch to a vendor context |
+| `jic vendor add <module>` | Add module to active vendor |
+| `jic vendor remove <module>` | Remove module from vendor |
+| `jic vendor sync` | Merge master into vendor branches |
+
+**Integration:** Sessions are vendor-aware (branch naming `<vendor>/feature/<name>`, base branch `<vendor>/dev`). Git commands operate on root repo when `isSubmodules()`. `resolveModules()` automatically filters to vendor modules.
+
+## Key Technical Details
+
+- ESM project (`"type": "module"` in package.json) — all imports use `.js` extensions
+- TypeScript path alias: `@/*` maps to `src-ts/*`
+- Strict TypeScript config: `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`, `verbatimModuleSyntax`
+- Build tool: `tsup` (bundles to `dist/`)
+- Test framework: `vitest`
+- Shell execution: `execa` library (`core/utils/shell.ts`)
+- Config validation: `zod` schemas
+- Some commands have subdirectory structure (e.g., `commands/build/`, `commands/deploy/`) for complex multi-file implementations
+
 ## Configuration Files
 
-- **jic.config.json**: Main configuration (modules, AWS, groups)
-- **jic.state.json**: Persistent state (sessions, deployments)
+| File | Purpose | VCS |
+|------|---------|-----|
+| `jic.config.json` | Module definitions, groups, AWS/K8s config, defaults | tracked |
+| `jic.local.json` | Local overrides (ports, paths) | git-ignored |
+| `jic.state.json` | Runtime state (sessions, deployments) | git-ignored |
 
 ## Environment Variables
 
