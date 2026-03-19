@@ -9,7 +9,8 @@ import { Command } from 'commander';
 import { execa } from 'execa';
 import type { IExecutionContext } from '../core/context/ExecutionContext.js';
 import { VendorError, withErrorHandling } from '../core/errors/index.js';
-import { listVendors } from '../core/config/vendor-loader.js';
+import { listVendors, saveVendorConfig, generateVendorConfig } from '../core/config/vendor-loader.js';
+import { gitInRoot } from '../core/utils/submodule.js';
 
 export function registerVendorCommand(
   program: Command,
@@ -95,6 +96,81 @@ export function registerVendorCommand(
         const nonVendorModules = allModuleNames.filter((m) => !vendorModuleSet.has(m));
         if (nonVendorModules.length > 0) {
           ctx.output.log(`Non-vendor modules: ${nonVendorModules.join(', ')}`);
+        }
+      })
+    );
+
+  // --- vendor create ---
+  vendor
+    .command('create <name>')
+    .description('Create a new vendor with config file and branches')
+    .option('--checkout', 'Switch to the new vendor after creation')
+    .option('--from <branch>', 'Base branch to create vendor branches from', 'master')
+    .action(
+      withErrorHandling(async (name: string, options: { checkout?: boolean; from: string }) => {
+        const ctx = await createContext();
+        assertSubmodules(ctx);
+
+        // Check if vendor already exists
+        const existing = await listVendors(ctx.projectRoot);
+        if (existing.includes(name)) {
+          throw new VendorError(`Vendor "${name}" already exists.`, name);
+        }
+
+        // Generate and save vendor config
+        const moduleNames = Object.keys(ctx.config.modules);
+        const vendorConfig = generateVendorConfig(name, moduleNames);
+        await saveVendorConfig(ctx.projectRoot, name, vendorConfig);
+        ctx.output.success(`Created vendor config: .jic/vendors/jic.config.${name}.json`);
+
+        // Create branches in root repo
+        const branchNames = [vendorConfig.branches.master, vendorConfig.branches.dev, vendorConfig.branches.build];
+        for (const branch of branchNames) {
+          try {
+            await gitInRoot(ctx.projectRoot, ['branch', branch, options.from]);
+            ctx.output.log(`  Created branch: ${branch} (root)`);
+          } catch (e) {
+            if (e instanceof Error && e.message.includes('already exists')) {
+              ctx.output.warn(`  Branch ${branch} already exists in root, skipping.`);
+            } else {
+              throw e;
+            }
+          }
+        }
+
+        // Create branches in submodules
+        const resolvedModules = Object.values(ctx.config.resolvedModules);
+        for (const mod of resolvedModules) {
+          if (!vendorConfig.modules.includes(mod.name)) continue;
+          for (const branch of branchNames) {
+            try {
+              await execa('git', ['branch', branch, options.from], { cwd: mod.absolutePath });
+              ctx.output.log(`  Created branch: ${branch} (${mod.name})`);
+            } catch (e) {
+              if (e instanceof Error && e.message.includes('already exists')) {
+                ctx.output.warn(`  Branch ${branch} already exists in ${mod.name}, skipping.`);
+              } else {
+                throw e;
+              }
+            }
+          }
+        }
+
+        ctx.output.success(`Vendor "${name}" created successfully.`);
+
+        if (options.checkout) {
+          // Perform vendor checkout inline
+          ctx.state.activeVendor = name;
+          await ctx.saveState();
+
+          await gitInRoot(ctx.projectRoot, ['checkout', vendorConfig.branches.master]);
+          for (const mod of resolvedModules) {
+            const branch = vendorConfig.modules.includes(mod.name)
+              ? vendorConfig.branches.master
+              : vendorConfig.nonVendorBranch ?? 'master';
+            await execa('git', ['checkout', branch], { cwd: mod.absolutePath });
+          }
+          ctx.output.success(`Switched to vendor "${name}".`);
         }
       })
     );
