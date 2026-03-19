@@ -25,44 +25,7 @@ import { exec, getGitBranch, getGitStatus, getGitCommit } from '../core/utils/sh
 import { colors } from '../core/utils/output.js';
 import { stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/submodule.js';
 
-// ============================================================================
-// Types
-// ============================================================================
-
-interface SessionTemplate {
-  description: string;
-  moduleGroups: string[];
-  baseBranch: string;
-  branchPrefix: string;
-}
-
-// Built-in session templates
-const SESSION_TEMPLATES: Record<string, SessionTemplate> = {
-  feature: {
-    description: 'Feature development across backend and frontend',
-    moduleGroups: ['@backend', '@frontend'],
-    baseBranch: 'feature/samuele',
-    branchPrefix: 'feature/',
-  },
-  hotfix: {
-    description: 'Quick fix for production issues',
-    moduleGroups: ['@backend', '@frontend'],
-    baseBranch: 'master',
-    branchPrefix: 'hotfix/',
-  },
-  api: {
-    description: 'API changes requiring flux client updates',
-    moduleGroups: ['@flux', '@backend'],
-    baseBranch: 'feature/samuele',
-    branchPrefix: 'feature/',
-  },
-  backend: {
-    description: 'Backend-only changes',
-    moduleGroups: ['@backend'],
-    baseBranch: 'feature/samuele',
-    branchPrefix: 'feature/',
-  },
-};
+import type { SessionTemplateConfig } from '../core/types/config.js';
 
 // ============================================================================
 // Session Command Registration
@@ -256,9 +219,10 @@ async function sessionStart(
   ctx.output.header(`Start Session: ${name}`);
 
   // Apply template if specified
-  let template: SessionTemplate | undefined;
+  const configTemplates = ctx.config.templates ?? {};
+  let template: SessionTemplateConfig | undefined;
   if (options.template) {
-    template = SESSION_TEMPLATES[options.template];
+    template = configTemplates[options.template];
     if (!template) {
       throw new SessionError(
         `Unknown template: ${options.template}. Use 'jic session templates' to list available templates.`
@@ -1190,7 +1154,14 @@ async function listTemplates(ctx: IExecutionContext): Promise<void> {
 
   const rows: string[][] = [];
 
-  for (const [name, template] of Object.entries(SESSION_TEMPLATES)) {
+  const configTemplates = ctx.config.templates ?? {};
+
+  if (Object.keys(configTemplates).length === 0) {
+    ctx.output.info('No templates defined. Add templates to jic.config.json under "templates".');
+    return;
+  }
+
+  for (const [name, template] of Object.entries(configTemplates)) {
     rows.push([
       colors.primary(name),
       template.description,

@@ -295,9 +295,6 @@ export interface JicState {
 
   /** Build cache */
   buildCache: Record<string, BuildCacheEntry>;
-
-  /** Session templates (user-defined) */
-  templates?: Record<string, SessionTemplate>;
 }
 
 // ============================================================================

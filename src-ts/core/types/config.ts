@@ -477,6 +477,24 @@ export interface ProjectConfig {
 }
 
 // ============================================================================
+// Session Template Configuration
+// ============================================================================
+
+/**
+ * Session template definition (in jic.config.json)
+ */
+export interface SessionTemplateConfig {
+  /** Template description */
+  description: string;
+  /** Module groups to include */
+  moduleGroups: string[];
+  /** Base branch for session */
+  baseBranch: string;
+  /** Branch prefix for session branches */
+  branchPrefix: string;
+}
+
+// ============================================================================
 // Main Configuration Interface
 // ============================================================================
 
@@ -510,6 +528,9 @@ export interface JicConfig {
 
   /** Kubernetes configuration */
   kubernetes?: KubernetesConfig;
+
+  /** Session templates */
+  templates?: Record<string, SessionTemplateConfig>;
 
   /** Serve configuration */
   serve?: ServeGlobalConfig;
