@@ -94,6 +94,12 @@ export interface Session {
   mergedBranches: MergedBranchRecord[];
   /** Session-specific config overrides */
   configOverrides?: Record<string, unknown>;
+  /** Vendor associated with this session */
+  vendor?: string;
+  /** Root repo branch for this session */
+  rootBranch?: string;
+  /** Root repo base branch for this session */
+  rootBaseBranch?: string;
 }
 
 // ============================================================================
@@ -267,6 +273,8 @@ export interface JicState {
   sessions: Record<string, Session>;
   /** Currently active session name */
   activeSession?: string;
+  /** Currently active vendor */
+  activeVendor?: string;
 
   /** Deployment records per environment */
   deployments: {
@@ -305,6 +313,7 @@ export function createEmptyState(): JicState {
     lastUpdated: new Date().toISOString(),
     sessions: {},
     activeSession: undefined,
+    activeVendor: undefined,
     deployments: {
       dev: {},
       staging: {},
