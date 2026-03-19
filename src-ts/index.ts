@@ -27,6 +27,7 @@ import {
   registerKubernetesCommand,
   registerVendorCommand,
   registerInitCommand,
+  registerModuleCommand,
 } from './commands/index.js';
 import { registerDashboardCommand } from './dashboard/index.js';
 
@@ -412,6 +413,7 @@ async function main(): Promise<void> {
     registerSearchCommand(program, createCtx);
     registerKubernetesCommand(program, createCtx);
     registerVendorCommand(program, createCtx);
+    registerModuleCommand(program, createCtx);
     registerDashboardCommand(program, createCtx);
 
     // Add status command
