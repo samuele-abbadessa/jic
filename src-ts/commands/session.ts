@@ -23,6 +23,7 @@ import type { Session } from '../core/types/state.js';
 import { SessionError, withErrorHandling } from '../core/errors/index.js';
 import { exec, getGitBranch, getGitStatus, getGitCommit } from '../core/utils/shell.js';
 import { colors } from '../core/utils/output.js';
+import { stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/submodule.js';
 
 // ============================================================================
 // Types
@@ -277,11 +278,22 @@ async function sessionStart(
     modules = Object.values(ctx.config.resolvedModules);
   }
 
-  // Determine base branch - if explicitly provided or from template, use that for all modules
-  // Otherwise, use each module's local default branch
-  const explicitBaseBranch = options.base ?? template?.baseBranch;
-  const branchPrefix = template?.branchPrefix ?? 'feature/';
-  const sessionBranch = `${branchPrefix}${name}`;
+  // Vendor-aware branch naming
+  const isSubmodules = ctx.isSubmodules();
+  const vendorConfig = ctx.vendorConfig;
+  let explicitBaseBranch: string | undefined;
+  let branchPrefix: string;
+  let sessionBranch: string;
+
+  if (isSubmodules && vendorConfig) {
+    explicitBaseBranch = options.base ?? vendorConfig.branches.dev;
+    branchPrefix = `${ctx.activeVendor}/feature/`;
+    sessionBranch = `${branchPrefix}${name}`;
+  } else {
+    explicitBaseBranch = options.base ?? template?.baseBranch;
+    branchPrefix = template?.branchPrefix ?? 'feature/';
+    sessionBranch = `${branchPrefix}${name}`;
+  }
 
   if (explicitBaseBranch) {
     ctx.output.keyValue('Base Branch', explicitBaseBranch);
@@ -374,6 +386,40 @@ async function sessionStart(
     }
   }
 
+  // Root repo operations for submodules projects
+  if (isSubmodules && !ctx.dryRun) {
+    const rootBaseBranch = explicitBaseBranch ?? vendorConfig?.branches.dev ?? 'dev';
+    try {
+      // Check if branch already exists in root
+      const rootBranchCheck = await exec(`git show-ref --verify --quiet refs/heads/${sessionBranch}`, {
+        cwd: ctx.projectRoot,
+        silent: true,
+      });
+      if (rootBranchCheck.success) {
+        await exec(`git checkout ${sessionBranch}`, { cwd: ctx.projectRoot, silent: true });
+      } else {
+        await exec(`git checkout -b ${sessionBranch} ${rootBaseBranch}`, { cwd: ctx.projectRoot, silent: true });
+      }
+      ctx.output.info(`Root repo: created branch ${sessionBranch}`);
+    } catch (error) {
+      ctx.output.warn(`Root repo: failed to create branch ${sessionBranch}`);
+    }
+
+    sessionData.rootBranch = sessionBranch;
+    sessionData.rootBaseBranch = rootBaseBranch;
+    sessionData.vendor = ctx.activeVendor;
+
+    // Commit submodule pointers
+    try {
+      const modulePaths = Object.keys(sessionData.modules)
+        .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory ?? name);
+      await stageSubmodulePointers(ctx.projectRoot, modulePaths);
+      await commitSubmodulePointers(ctx.projectRoot, Object.keys(sessionData.modules));
+    } catch {
+      // Submodule pointer commit may fail if nothing changed
+    }
+  }
+
   // Save session
   if (!ctx.dryRun) {
     if (!ctx.state.sessions) {
@@ -460,6 +506,17 @@ async function sessionEnd(
       if (ctx.verbose && error instanceof Error) {
         ctx.output.error(`  ${error.message}`);
       }
+    }
+  }
+
+  // Root repo checkout for submodules
+  if (ctx.isSubmodules() && !ctx.dryRun) {
+    const rootBranch = session.rootBaseBranch ?? (ctx.vendorConfig?.branches.dev ?? 'dev');
+    try {
+      await exec(`git checkout ${rootBranch}`, { cwd: ctx.projectRoot, silent: true });
+      ctx.output.info(`Root repo: on ${rootBranch}`);
+    } catch {
+      ctx.output.warn(`Root repo: failed to checkout ${rootBranch}`);
     }
   }
 
@@ -660,6 +717,29 @@ async function mergeSessionBranches(
       }
     }
   }
+
+  // Root repo merge for submodules
+  if (ctx.isSubmodules() && session.rootBranch && session.rootBaseBranch) {
+    const spinner = ctx.output.spinner(`root: merging to ${session.rootBaseBranch}`);
+    spinner.start();
+    try {
+      if (ctx.dryRun) {
+        spinner.info(`[dry-run] Would merge ${session.rootBranch} to ${session.rootBaseBranch}`);
+      } else {
+        await exec(`git checkout ${session.rootBaseBranch}`, { cwd: ctx.projectRoot, silent: true });
+        await exec(`git merge ${session.rootBranch} --no-edit`, { cwd: ctx.projectRoot, silent: true });
+        spinner.succeed(`root: merged to ${session.rootBaseBranch}`);
+
+        // Update submodule pointers
+        const modulePaths = Object.keys(session.modules)
+          .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory ?? name);
+        await stageSubmodulePointers(ctx.projectRoot, modulePaths);
+        await commitSubmodulePointers(ctx.projectRoot, Object.keys(session.modules));
+      }
+    } catch {
+      spinner.fail('root: merge failed');
+    }
+  }
 }
 
 // ============================================================================
@@ -682,6 +762,13 @@ async function sessionCheckout(
   }
 
   ctx.output.header(`Checkout Session: ${sessionName}`);
+
+  // Vendor coherence check
+  if (ctx.isSubmodules() && session.vendor && session.vendor !== ctx.activeVendor) {
+    ctx.output.info(`Session "${sessionName}" belongs to vendor "${session.vendor}". Switching vendor...`);
+    ctx.state.activeVendor = session.vendor;
+    await ctx.saveState();
+  }
 
   for (const [moduleName, moduleSession] of Object.entries(session.modules)) {
     const module = ctx.getModule(moduleName);
@@ -724,6 +811,16 @@ async function sessionCheckout(
       }
     }
   }
+
+  // Root repo checkout for submodules
+  if (ctx.isSubmodules() && session.rootBranch) {
+    try {
+      await exec(`git checkout ${session.rootBranch}`, { cwd: ctx.projectRoot, silent: true });
+      ctx.output.info(`Root repo: on ${session.rootBranch}`);
+    } catch {
+      ctx.output.warn(`Root repo: failed to checkout ${session.rootBranch}`);
+    }
+  }
 }
 
 // ============================================================================
@@ -759,7 +856,7 @@ async function sessionList(ctx: IExecutionContext, options: { all?: boolean }): 
     // Check if session branch was merged
     const mergeInfo = await checkSessionMergeStatus(ctx, session);
 
-    rows.push([
+    const row = [
       isActive ? colors.success(`* ${session.name}`) : `  ${session.name}`,
       session.status === 'active' ? colors.success('active') : colors.muted('ended'),
       String(moduleCount),
@@ -768,11 +865,21 @@ async function sessionList(ctx: IExecutionContext, options: { all?: boolean }): 
       mergeInfo.merged
         ? colors.success(`Yes (${mergeInfo.mergedAt ?? 'unknown'})`)
         : colors.muted('No'),
-    ]);
+    ];
+    if (ctx.isSubmodules()) {
+      row.splice(2, 0, session.vendor ?? '-');
+    }
+    rows.push(row);
+  }
+
+  // Add vendor column header if submodules
+  const headers = ['Name', 'Status', 'Modules', 'Branch', 'Created', 'Merged'];
+  if (ctx.isSubmodules()) {
+    headers.splice(2, 0, 'Vendor');
   }
 
   ctx.output.table(rows, {
-    head: ['Name', 'Status', 'Modules', 'Branch', 'Created', 'Merged'],
+    head: headers,
   });
 }
 
@@ -1172,6 +1279,17 @@ async function sessionPause(
     ctx.output.info('No changes to stash');
   }
 
+  // Root repo stash for submodules
+  if (ctx.isSubmodules() && session.rootBranch && !ctx.dryRun) {
+    try {
+      const rootStatus = await getGitStatus(ctx.projectRoot);
+      if (!rootStatus.clean) {
+        await exec(`git stash push -m "${stashMessage}"`, { cwd: ctx.projectRoot, silent: true });
+        ctx.output.info('Root repo: stashed');
+      }
+    } catch { /* nothing to stash */ }
+  }
+
   // Step 2: Checkout default local branches
   ctx.output.newline();
   ctx.output.subheader('Checking out default branches');
@@ -1210,6 +1328,16 @@ async function sessionPause(
       if (ctx.verbose && error instanceof Error) {
         ctx.output.error(`  ${error.message}`);
       }
+    }
+  }
+
+  // Root repo checkout for submodules
+  if (ctx.isSubmodules() && session.rootBaseBranch && !ctx.dryRun) {
+    try {
+      await exec(`git checkout ${session.rootBaseBranch}`, { cwd: ctx.projectRoot, silent: true });
+      ctx.output.info(`Root repo: on ${session.rootBaseBranch}`);
+    } catch {
+      ctx.output.warn(`Root repo: failed to checkout ${session.rootBaseBranch}`);
     }
   }
 
@@ -1304,6 +1432,22 @@ async function sessionResume(
         ctx.output.error(`  ${error.message}`);
       }
     }
+  }
+
+  // Root repo checkout for submodules
+  if (ctx.isSubmodules() && session.rootBranch && !ctx.dryRun) {
+    try {
+      await exec(`git checkout ${session.rootBranch}`, { cwd: ctx.projectRoot, silent: true });
+      ctx.output.info(`Root repo: on ${session.rootBranch}`);
+    } catch {
+      ctx.output.warn(`Root repo: failed to checkout ${session.rootBranch}`);
+    }
+
+    // Try to pop root stash
+    try {
+      await exec('git stash pop', { cwd: ctx.projectRoot, silent: true });
+      ctx.output.info('Root repo: stash restored');
+    } catch { /* no stash */ }
   }
 
   // Step 2: Pop stashes that match this session
