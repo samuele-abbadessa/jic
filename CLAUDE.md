@@ -128,6 +128,18 @@ For projects with `project.type: "submodules"`, the CLI supports vendor-branch d
 
 **Integration:** Sessions use vendor-prefixed branches (`<vendor>/feature/<name>`, base: `<vendor>/dev`). Git commands operate on root repo when `isSubmodules()`. `jic git commit --update-root` commits submodule pointers.
 
+### Module Commands
+
+| Command | Description |
+|---------|-------------|
+| `jic module discovery` | Scan subdirectories for git repos and add to config |
+| `jic module config <module> get <key>` | Read a module config value (dot-path) |
+| `jic module config <module> set <key> <value>` | Write a module config value |
+
+Module types: `java-service`, `flux-client`, `frontend`, `node-service`, `lambda-layer`, `lambda-functions`, `dotnet-service`, `unknown`.
+
+Detection logic in `core/utils/module-detector.ts`. Discovery only scans first-level subdirectories with `.git`.
+
 ## Key Technical Details
 
 - ESM project (`"type": "module"` in package.json) — all imports use `.js` extensions
