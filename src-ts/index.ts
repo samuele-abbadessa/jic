@@ -26,6 +26,7 @@ import {
   registerSearchCommand,
   registerKubernetesCommand,
   registerVendorCommand,
+  registerInitCommand,
 } from './commands/index.js';
 import { registerDashboardCommand } from './dashboard/index.js';
 
@@ -396,6 +397,9 @@ async function main(): Promise<void> {
 
     // Create context factory for commands
     const createCtx = createContextFactory(program);
+
+    // Register init command first (works without config file)
+    registerInitCommand(program, createCtx);
 
     // Register commands
     registerBuildCommand(program, createCtx);
