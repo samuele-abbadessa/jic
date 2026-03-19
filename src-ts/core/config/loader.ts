@@ -32,9 +32,11 @@ import type {
 import type { ResolvedModule, ResolvedBuildConfig, ResolvedServeConfig } from '../types/module.js';
 import type { JicState } from '../types/state.js';
 import { createEmptyState } from '../types/state.js';
+import type { LoadedVendorConfig } from '../types/vendor.js';
 import { ConfigError } from '../errors/index.js';
 import { builtInDefaults } from './defaults.js';
 import { deepMerge, removeUndefined } from './merger.js';
+import { loadVendorConfig } from './vendor-loader.js';
 
 // ============================================================================
 // Constants
@@ -76,6 +78,8 @@ export interface LoadedConfig extends JicConfig {
   state: JicState;
   /** Resolved modules (with defaults merged) */
   resolvedModules: Record<string, ResolvedModule>;
+  /** Loaded vendor configuration (for submodules projects) */
+  vendorConfig?: LoadedVendorConfig;
 }
 
 // ============================================================================
@@ -341,6 +345,20 @@ export async function loadConfig(options: LoadOptions = {}): Promise<LoadedConfi
     ? createEmptyState()
     : (await loadJsonFile<JicState>(join(projectRoot, STATE_FILENAME))) ?? createEmptyState();
 
+  // Vendor config loading (for submodules projects)
+  let vendorConfig: LoadedVendorConfig | undefined;
+  if (mainConfig.project?.type === 'submodules') {
+    if (!state.activeVendor) {
+      state.activeVendor = 'root';
+    }
+    try {
+      vendorConfig = await loadVendorConfig(projectRoot, state.activeVendor);
+    } catch {
+      // Vendor config not found — don't fail loading, just leave undefined
+      // This allows the project to work even without vendor configs initially
+    }
+  }
+
   // Merge defaults: built-in <- config defaults
   const mergedDefaults = deepMerge<DefaultsConfig>(
     builtInDefaults,
@@ -376,6 +394,7 @@ export async function loadConfig(options: LoadOptions = {}): Promise<LoadedConfi
     },
     state,
     resolvedModules,
+    vendorConfig,
   };
 }
 
