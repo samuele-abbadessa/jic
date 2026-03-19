@@ -359,6 +359,82 @@ export function registerVendorCommand(
         ctx.output.success(`Removed "${mod.name}" from vendor "${vendorName}". Branches not deleted.`);
       })
     );
+
+  // --- vendor sync ---
+  vendor
+    .command('sync')
+    .description('Merge master into active vendor branches (fail-fast)')
+    .action(
+      withErrorHandling(async () => {
+        const ctx = await createContext();
+        assertSubmodules(ctx);
+
+        const vendorName = ctx.activeVendor;
+        if (!vendorName) throw new VendorError('No active vendor.');
+        if (vendorName === 'root') {
+          throw new VendorError('Cannot sync vendor "root" — it is the base vendor.', vendorName);
+        }
+        if (ctx.isSessionActive()) {
+          const session = ctx.activeSession!;
+          throw new VendorError(
+            `Cannot sync vendor while session "${session.name}" is active. End or pause the session first.`,
+            vendorName
+          );
+        }
+
+        const vendorConfig = ctx.vendorConfig;
+        if (!vendorConfig) {
+          throw new VendorError(`Vendor config not loaded for "${vendorName}"`, vendorName);
+        }
+
+        const mergeSource = 'master';
+
+        // Sync root repo
+        ctx.output.info('Syncing root repo...');
+        try {
+          await gitInRoot(ctx.projectRoot, ['merge', mergeSource]);
+          ctx.output.success('  Root repo: merged successfully.');
+        } catch {
+          ctx.output.error('  Root repo: merge conflict. Resolve conflicts, then re-run "jic vendor sync".');
+          throw new VendorError('Merge conflict in root repo during vendor sync.', vendorName);
+        }
+
+        // Sync each vendor submodule (fail-fast)
+        const resolvedModules = Object.values(ctx.config.resolvedModules);
+        const vendorModuleSet = new Set(vendorConfig.modules);
+        const syncedModules: string[] = [];
+
+        for (const mod of resolvedModules) {
+          if (!vendorModuleSet.has(mod.name)) continue;
+
+          ctx.output.info(`Syncing ${mod.name}...`);
+          try {
+            await execa('git', ['merge', mergeSource], { cwd: mod.absolutePath });
+            ctx.output.success(`  ${mod.name}: merged successfully.`);
+            syncedModules.push(mod.name);
+          } catch {
+            ctx.output.error(
+              `  ${mod.name}: merge conflict. Resolve conflicts in ${mod.absolutePath}, then re-run "jic vendor sync".`
+            );
+            throw new VendorError(
+              `Merge conflict in ${mod.name} during vendor sync.`,
+              vendorName
+            );
+          }
+        }
+
+        // Update submodule pointers in root
+        if (syncedModules.length > 0) {
+          ctx.output.info('Updating submodule pointers in root repo...');
+          const modulePaths = syncedModules
+            .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory ?? name);
+          await stageSubmodulePointers(ctx.projectRoot, modulePaths);
+          await commitSubmodulePointers(ctx.projectRoot, syncedModules);
+        }
+
+        ctx.output.success(`Vendor "${vendorName}" synced with ${mergeSource}.`);
+      })
+    );
 }
 
 function assertSubmodules(ctx: IExecutionContext): void {
