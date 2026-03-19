@@ -26,6 +26,7 @@ export const ExitCodes = {
   SESSION_ERROR: 8,
   VALIDATION_ERROR: 9,
   KUBERNETES_ERROR: 10,
+  VENDOR_ERROR: 11,
   INTERRUPTED: 130,
 } as const;
 
@@ -304,6 +305,23 @@ export class KubernetesError extends JicError {
     this.name = 'KubernetesError';
     this.resource = options.resource;
     this.operation = options.operation;
+  }
+}
+
+/**
+ * Vendor error
+ */
+export class VendorError extends JicError {
+  readonly vendorName?: string;
+
+  constructor(message: string, vendorName?: string, cause?: Error) {
+    super(message, {
+      exitCode: ExitCodes.VENDOR_ERROR,
+      context: vendorName ? { vendor: vendorName } : undefined,
+      cause,
+    });
+    this.name = 'VendorError';
+    this.vendorName = vendorName;
   }
 }
 
