@@ -14,9 +14,11 @@ import type { ResolvedModule } from '../types/module.js';
 import type { GlobalOptions } from '../types/execution.js';
 import type { Environment, AwsEnvironmentConfig, KubernetesEnvironmentConfig, FailStrategy } from '../types/config.js';
 import type { JicState, Session } from '../types/state.js';
+import type { LoadedVendorConfig } from '../types/vendor.js';
 import { Output, createOutput } from '../utils/output.js';
 import { getModule, resolveModules, saveState } from '../config/loader.js';
 import { computeFailStrategy } from '../types/execution.js';
+import { VendorError } from '../errors/index.js';
 
 // ============================================================================
 // Context Interface
@@ -63,6 +65,11 @@ export interface IExecutionContext {
 
   // Kubernetes
   getK8sConfig(env?: Environment): KubernetesEnvironmentConfig;
+
+  // Vendor
+  readonly activeVendor: string | undefined;
+  readonly vendorConfig: LoadedVendorConfig | undefined;
+  isSubmodules(): boolean;
 }
 
 // ============================================================================
@@ -139,6 +146,22 @@ export class ExecutionContext implements IExecutionContext {
   }
 
   // ==========================================================================
+  // Vendor
+  // ==========================================================================
+
+  get activeVendor(): string | undefined {
+    return this.config.state.activeVendor;
+  }
+
+  get vendorConfig(): LoadedVendorConfig | undefined {
+    return this.config.vendorConfig;
+  }
+
+  isSubmodules(): boolean {
+    return this.config.project?.type === 'submodules';
+  }
+
+  // ==========================================================================
   // Module Resolution
   // ==========================================================================
 
@@ -162,7 +185,35 @@ export class ExecutionContext implements IExecutionContext {
       }
     }
 
-    return resolveModules(this.config, refs);
+    let modules = resolveModules(this.config, refs);
+
+    // Vendor filtering (only when submodules project with active vendor)
+    if (this.isSubmodules() && this.vendorConfig) {
+      const vendorModules = new Set(this.vendorConfig.modules);
+      if (refs.length === 0) {
+        // No explicit refs: return only vendor modules
+        modules = modules.filter((m) => vendorModules.has(m.name));
+      } else {
+        // Explicit refs provided
+        const isGroupRef = refs.every((r) => r.startsWith('@'));
+        if (isGroupRef) {
+          // Group references: silently intersect with vendor modules
+          modules = modules.filter((m) => vendorModules.has(m.name));
+        } else {
+          // Explicit module references: error if outside vendor
+          const outsideVendor = modules.filter((m) => !vendorModules.has(m.name));
+          if (outsideVendor.length > 0) {
+            const names = outsideVendor.map((m) => m.name).join(', ');
+            throw new VendorError(
+              `Modules "${names}" not in vendor "${this.activeVendor}". Use "jic vendor add" first.`,
+              this.activeVendor
+            );
+          }
+        }
+      }
+    }
+
+    return modules;
   }
 
   // ==========================================================================
