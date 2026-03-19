@@ -10,7 +10,7 @@ import { execa } from 'execa';
 import type { IExecutionContext } from '../core/context/ExecutionContext.js';
 import { VendorError, withErrorHandling } from '../core/errors/index.js';
 import { listVendors, loadVendorConfig, saveVendorConfig, generateVendorConfig } from '../core/config/vendor-loader.js';
-import { gitInRoot } from '../core/utils/submodule.js';
+import { gitInRoot, stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/submodule.js';
 
 export function registerVendorCommand(
   program: Command,
@@ -255,6 +255,108 @@ export function registerVendorCommand(
         await ctx.saveState();
 
         ctx.output.success(`Switched to vendor "${name}".`);
+      })
+    );
+
+  // --- vendor add ---
+  vendor
+    .command('add <module>')
+    .description('Add a module to the active vendor')
+    .action(
+      withErrorHandling(async (moduleName: string) => {
+        const ctx = await createContext();
+        assertSubmodules(ctx);
+
+        const vendorName = ctx.activeVendor;
+        if (!vendorName) throw new VendorError('No active vendor.');
+        if (vendorName === 'root') {
+          throw new VendorError('Cannot add modules to vendor "root" — it already contains all modules.', vendorName);
+        }
+
+        // Verify module exists in root config (bypass vendor filter by checking resolvedModules directly)
+        const mod = ctx.config.resolvedModules[moduleName]
+          ?? Object.values(ctx.config.resolvedModules).find((m) => m.originalConfig.aliases?.includes(moduleName));
+        if (!mod) {
+          throw new VendorError(`Module "${moduleName}" not found in project config.`, vendorName);
+        }
+
+        // Load current vendor config
+        const vendorCfg = await loadVendorConfig(ctx.projectRoot, vendorName);
+        if (vendorCfg.modules.includes(mod.name)) {
+          ctx.output.warn(`Module "${mod.name}" is already in vendor "${vendorName}".`);
+          return;
+        }
+
+        // Create vendor branches in the module
+        const branchNames = [vendorCfg.branches.master, vendorCfg.branches.dev, vendorCfg.branches.build];
+        for (const branch of branchNames) {
+          try {
+            await execa('git', ['branch', branch, 'master'], { cwd: mod.absolutePath });
+            ctx.output.log(`  Created branch: ${branch} (${mod.name})`);
+          } catch (e) {
+            if (e instanceof Error && e.message.includes('already exists')) {
+              ctx.output.warn(`  Branch ${branch} already exists in ${mod.name}, skipping.`);
+            } else {
+              throw e;
+            }
+          }
+        }
+
+        // Update vendor config file
+        vendorCfg.modules.push(mod.name);
+        const { name: _, configPath: __, ...configToSave } = vendorCfg;
+        await saveVendorConfig(ctx.projectRoot, vendorName, configToSave);
+
+        // Update submodule pointer in root
+        const modDir = mod.originalConfig.directory ?? mod.name;
+        await stageSubmodulePointers(ctx.projectRoot, [modDir]);
+        await commitSubmodulePointers(ctx.projectRoot, [mod.name]);
+
+        ctx.output.success(`Added "${mod.name}" to vendor "${vendorName}".`);
+      })
+    );
+
+  // --- vendor remove ---
+  vendor
+    .command('remove <module>')
+    .description('Remove a module from the active vendor (does not delete branches)')
+    .action(
+      withErrorHandling(async (moduleName: string) => {
+        const ctx = await createContext();
+        assertSubmodules(ctx);
+
+        const vendorName = ctx.activeVendor;
+        if (!vendorName) throw new VendorError('No active vendor.');
+        if (vendorName === 'root') {
+          throw new VendorError('Cannot remove modules from vendor "root".', vendorName);
+        }
+
+        const mod = ctx.config.resolvedModules[moduleName]
+          ?? Object.values(ctx.config.resolvedModules).find((m) => m.originalConfig.aliases?.includes(moduleName));
+        if (!mod) {
+          throw new VendorError(`Module "${moduleName}" not found in project config.`, vendorName);
+        }
+
+        const vendorCfg = await loadVendorConfig(ctx.projectRoot, vendorName);
+        if (!vendorCfg.modules.includes(mod.name)) {
+          ctx.output.warn(`Module "${mod.name}" is not in vendor "${vendorName}".`);
+          return;
+        }
+
+        // Guard: cannot remove last module
+        if (vendorCfg.modules.length === 1) {
+          throw new VendorError(
+            `Cannot remove the last module from vendor "${vendorName}". Delete the vendor instead.`,
+            vendorName
+          );
+        }
+
+        // Update vendor config file
+        vendorCfg.modules = vendorCfg.modules.filter((m) => m !== mod.name);
+        const { name: _, configPath: __, ...configToSave } = vendorCfg;
+        await saveVendorConfig(ctx.projectRoot, vendorName, configToSave);
+
+        ctx.output.success(`Removed "${mod.name}" from vendor "${vendorName}". Branches not deleted.`);
       })
     );
 }
