@@ -304,7 +304,8 @@ export function registerVendorCommand(
 
         // Update vendor config file
         vendorCfg.modules.push(mod.name);
-        const { name: _, configPath: __, ...configToSave } = vendorCfg;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { name: _n, configPath: _cp, ...configToSave } = vendorCfg;
         await saveVendorConfig(ctx.projectRoot, vendorName, configToSave);
 
         // Update submodule pointer in root
@@ -353,7 +354,8 @@ export function registerVendorCommand(
 
         // Update vendor config file
         vendorCfg.modules = vendorCfg.modules.filter((m) => m !== mod.name);
-        const { name: _, configPath: __, ...configToSave } = vendorCfg;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { name: _n2, configPath: _cp2, ...configToSave } = vendorCfg;
         await saveVendorConfig(ctx.projectRoot, vendorName, configToSave);
 
         ctx.output.success(`Removed "${mod.name}" from vendor "${vendorName}". Branches not deleted.`);
