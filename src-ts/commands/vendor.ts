@@ -9,7 +9,7 @@ import { Command } from 'commander';
 import { execa } from 'execa';
 import type { IExecutionContext } from '../core/context/ExecutionContext.js';
 import { VendorError, withErrorHandling } from '../core/errors/index.js';
-import { listVendors, saveVendorConfig, generateVendorConfig } from '../core/config/vendor-loader.js';
+import { listVendors, loadVendorConfig, saveVendorConfig, generateVendorConfig } from '../core/config/vendor-loader.js';
 import { gitInRoot } from '../core/utils/submodule.js';
 
 export function registerVendorCommand(
@@ -172,6 +172,89 @@ export function registerVendorCommand(
           }
           ctx.output.success(`Switched to vendor "${name}".`);
         }
+      })
+    );
+
+  // --- vendor checkout ---
+  vendor
+    .command('checkout <name>')
+    .description('Switch to a vendor context')
+    .option('-f, --force', 'Stash uncommitted changes before switching')
+    .action(
+      withErrorHandling(async (name: string, options: { force?: boolean }) => {
+        const ctx = await createContext();
+        assertSubmodules(ctx);
+
+        // Guard: no switch during active session (--force does NOT bypass this)
+        if (ctx.isSessionActive()) {
+          const session = ctx.activeSession!;
+          throw new VendorError(
+            `Cannot switch vendor while session "${session.name}" is active. End or pause the session first.`,
+            name
+          );
+        }
+
+        // Verify vendor exists
+        const vendorConfig = await loadVendorConfig(ctx.projectRoot, name);
+        const vendorModuleSet = new Set(vendorConfig.modules);
+
+        // Check for uncommitted changes
+        const allModules = Object.values(ctx.config.resolvedModules);
+        if (!options.force) {
+          // Check root repo
+          const { stdout: rootStatus } = await gitInRoot(ctx.projectRoot, ['status', '--porcelain']);
+          if (rootStatus.trim().length > 0) {
+            throw new VendorError(
+              'Uncommitted changes in root repo. Use --force to stash.',
+              name
+            );
+          }
+          // Check submodules
+          for (const mod of allModules) {
+            const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: mod.absolutePath });
+            if (stdout.trim().length > 0) {
+              throw new VendorError(
+                `Uncommitted changes in ${mod.name}. Use --force to stash.`,
+                name
+              );
+            }
+          }
+        } else {
+          // Stash everything
+          const { stdout: rootStatus } = await gitInRoot(ctx.projectRoot, ['status', '--porcelain']);
+          if (rootStatus.trim().length > 0) {
+            await gitInRoot(ctx.projectRoot, ['stash', 'push', '-m', `jic-vendor-switch-${name}`]);
+          }
+          for (const mod of allModules) {
+            const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: mod.absolutePath });
+            if (stdout.trim().length > 0) {
+              await execa('git', ['stash', 'push', '-m', `jic-vendor-switch-${name}`], { cwd: mod.absolutePath });
+            }
+          }
+        }
+
+        // Checkout root repo
+        ctx.output.info(`Checking out root repo: ${vendorConfig.branches.master}`);
+        await gitInRoot(ctx.projectRoot, ['checkout', vendorConfig.branches.master]);
+
+        // Checkout modules
+        for (const mod of allModules) {
+          if (vendorModuleSet.has(mod.name)) {
+            const branch = vendorConfig.branches.master;
+            ctx.output.log(`  ${mod.name}: checkout ${branch}`);
+            await execa('git', ['checkout', branch], { cwd: mod.absolutePath });
+          } else {
+            const branch = vendorConfig.nonVendorBranch ?? 'master';
+            ctx.output.log(`  ${mod.name}: checkout ${branch}`);
+            await execa('git', ['checkout', branch], { cwd: mod.absolutePath });
+          }
+        }
+
+        // Update state
+        ctx.state.activeVendor = name;
+        await ctx.saveState();
+
+        ctx.output.success(`Switched to vendor "${name}".`);
       })
     );
 }
