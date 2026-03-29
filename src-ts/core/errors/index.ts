@@ -27,6 +27,7 @@ export const ExitCodes = {
   VALIDATION_ERROR: 9,
   KUBERNETES_ERROR: 10,
   VENDOR_ERROR: 11,
+  GITLAB_ERROR: 12,
   INTERRUPTED: 130,
 } as const;
 
@@ -322,6 +323,23 @@ export class VendorError extends JicError {
     });
     this.name = 'VendorError';
     this.vendorName = vendorName;
+  }
+}
+
+/**
+ * GitLab API error
+ */
+export class GitlabError extends JicError {
+  readonly moduleName?: string;
+
+  constructor(message: string, moduleName?: string, cause?: Error) {
+    super(message, {
+      exitCode: ExitCodes.GITLAB_ERROR,
+      context: moduleName ? { module: moduleName } : undefined,
+      cause,
+    });
+    this.name = 'GitlabError';
+    this.moduleName = moduleName;
   }
 }
 

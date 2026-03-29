@@ -24,6 +24,7 @@ import { SessionError, withErrorHandling } from '../core/errors/index.js';
 import { exec, getGitBranch, getGitStatus, getGitCommit } from '../core/utils/shell.js';
 import { colors } from '../core/utils/output.js';
 import { stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/submodule.js';
+import { createMergeRequestsForModules } from '../core/utils/gitlab.js';
 
 import type { SessionTemplateConfig } from '../core/types/config.js';
 
@@ -70,9 +71,10 @@ export function registerSessionCommand(
     .description('End a work session')
     .option('--merge', 'Merge session branches to base')
     .option('--delete-branches', 'Delete session branches after merge')
+    .option('--pr', 'Create merge requests after merging (requires --merge)')
     .action(
       withErrorHandling(
-        async (name: string | undefined, options: { merge?: boolean; deleteBranches?: boolean }) => {
+        async (name: string | undefined, options: { merge?: boolean; deleteBranches?: boolean; pr?: boolean }) => {
           const ctx = await createContext();
           await sessionEnd(ctx, name, options);
         }
@@ -406,8 +408,12 @@ async function sessionStart(
 async function sessionEnd(
   ctx: IExecutionContext,
   name: string | undefined,
-  options: { merge?: boolean; deleteBranches?: boolean }
+  options: { merge?: boolean; deleteBranches?: boolean; pr?: boolean }
 ): Promise<void> {
+  if (options.pr && !options.merge) {
+    throw new SessionError('--pr requires --merge. Use: jic session end --merge --pr');
+  }
+
   const sessionName = name ?? ctx.state.activeSession;
   if (!sessionName) {
     throw new SessionError('No active session. Specify session name or start a session first.');
@@ -482,6 +488,16 @@ async function sessionEnd(
     } catch {
       ctx.output.warn(`Root repo: failed to checkout ${rootBranch}`);
     }
+  }
+
+  // Create merge requests if --pr flag
+  if (options.pr && !ctx.dryRun) {
+    ctx.output.newline();
+    ctx.output.header('Creating merge requests');
+    await createMergeRequestsForModules(ctx, {
+      target: 'master',
+      draft: false,
+    });
   }
 
   // Update session status

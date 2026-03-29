@@ -14,5 +14,6 @@ export * from './clean.js';
 export * from './search.js';
 export * from './k8s.js';
 export * from './vendor.js';
+export * from './pr.js';
 export * from './init.js';
 export * from './module.js';
