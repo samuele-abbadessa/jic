@@ -66,7 +66,8 @@ export function registerVendorCommand(
         }
 
         ctx.output.info(`Vendor: ${vendorName}`);
-        ctx.output.log(`Branch: ${vendorConfig.branches.master}`);
+        const statusBranch = vendorConfig.branches.master ?? vendorConfig.branches.dev;
+        ctx.output.log(`Branch: ${statusBranch}`);
         ctx.output.log(
           `Modules: ${vendorConfig.modules.join(', ')} (${vendorConfig.modules.length}/${Object.keys(ctx.config.modules).length})`
         );
@@ -81,14 +82,14 @@ export function registerVendorCommand(
           if (!mod) continue;
           try {
             const { stdout } = await execa(
-              'git', ['rev-list', '--count', `${vendorConfig.branches.master}..master`],
+              'git', ['rev-list', '--count', `${statusBranch}..master`],
               { cwd: mod.absolutePath }
             );
             const behind = parseInt(stdout.trim(), 10);
             const behindStr = behind > 0 ? `${behind} commits behind` : 'up to date';
-            ctx.output.log(`  ${modName}: ${vendorConfig.branches.master} (${behindStr})`);
+            ctx.output.log(`  ${modName}: ${statusBranch} (${behindStr})`);
           } catch {
-            ctx.output.log(`  ${modName}: ${vendorConfig.branches.master} (unknown)`);
+            ctx.output.log(`  ${modName}: ${statusBranch} (unknown)`);
           }
         }
 
@@ -124,7 +125,7 @@ export function registerVendorCommand(
         ctx.output.success(`Created vendor config: .jic/vendors/jic.config.${name}.json`);
 
         // Create branches in root repo
-        const branchNames = [vendorConfig.branches.master, vendorConfig.branches.dev, vendorConfig.branches.build];
+        const branchNames = [vendorConfig.branches.master, vendorConfig.branches.dev, vendorConfig.branches.build].filter((b): b is string => !!b);
         for (const branch of branchNames) {
           try {
             await gitInRoot(ctx.projectRoot, ['branch', branch, options.from]);
@@ -163,10 +164,11 @@ export function registerVendorCommand(
           ctx.state.activeVendor = name;
           await ctx.saveState();
 
-          await gitInRoot(ctx.projectRoot, ['checkout', vendorConfig.branches.master]);
+          const checkoutBranch = vendorConfig.branches.master ?? vendorConfig.branches.dev;
+          await gitInRoot(ctx.projectRoot, ['checkout', checkoutBranch]);
           for (const mod of resolvedModules) {
             const branch = vendorConfig.modules.includes(mod.name)
-              ? vendorConfig.branches.master
+              ? checkoutBranch
               : vendorConfig.nonVendorBranch ?? 'master';
             await execa('git', ['checkout', branch], { cwd: mod.absolutePath });
           }
@@ -234,15 +236,15 @@ export function registerVendorCommand(
         }
 
         // Checkout root repo
-        ctx.output.info(`Checking out root repo: ${vendorConfig.branches.master}`);
-        await gitInRoot(ctx.projectRoot, ['checkout', vendorConfig.branches.master]);
+        const checkoutBranch = vendorConfig.branches.master ?? vendorConfig.branches.dev;
+        ctx.output.info(`Checking out root repo: ${checkoutBranch}`);
+        await gitInRoot(ctx.projectRoot, ['checkout', checkoutBranch]);
 
         // Checkout modules
         for (const mod of allModules) {
           if (vendorModuleSet.has(mod.name)) {
-            const branch = vendorConfig.branches.master;
-            ctx.output.log(`  ${mod.name}: checkout ${branch}`);
-            await execa('git', ['checkout', branch], { cwd: mod.absolutePath });
+            ctx.output.log(`  ${mod.name}: checkout ${checkoutBranch}`);
+            await execa('git', ['checkout', checkoutBranch], { cwd: mod.absolutePath });
           } else {
             const branch = vendorConfig.nonVendorBranch ?? 'master';
             ctx.output.log(`  ${mod.name}: checkout ${branch}`);
@@ -288,7 +290,7 @@ export function registerVendorCommand(
         }
 
         // Create vendor branches in the module
-        const branchNames = [vendorCfg.branches.master, vendorCfg.branches.dev, vendorCfg.branches.build];
+        const branchNames = [vendorCfg.branches.master, vendorCfg.branches.dev, vendorCfg.branches.build].filter((b): b is string => !!b);
         for (const branch of branchNames) {
           try {
             await execa('git', ['branch', branch, 'master'], { cwd: mod.absolutePath });

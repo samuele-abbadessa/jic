@@ -97,9 +97,7 @@ export function generateVendorConfig(
     description: isRoot ? 'Root vendor — all modules on default branches' : `Vendor: ${vendorName}`,
     modules: moduleNames,
     branches: {
-      master: isRoot ? 'master' : `${vendorName}/master`,
       dev: isRoot ? 'dev' : `${vendorName}/dev`,
-      build: isRoot ? 'build' : `${vendorName}/build`,
     },
   };
 }

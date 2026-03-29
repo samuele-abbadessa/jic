@@ -1,9 +1,9 @@
 import type { AwsConfig, KubernetesConfig } from './config.js';
 
 export interface VendorBranchConfig {
-  master: string;
+  master?: string;
   dev: string;
-  build: string;
+  build?: string;
 }
 
 export interface VendorConfig {

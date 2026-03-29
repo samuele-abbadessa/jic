@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
 export const VendorBranchConfigSchema = z.object({
-  master: z.string().min(1),
+  master: z.string().min(1).optional(),
   dev: z.string().min(1),
-  build: z.string().min(1),
+  build: z.string().min(1).optional(),
 });
 
 export const VendorConfigSchema = z.object({
