@@ -202,10 +202,17 @@ export function registerVendorCommand(
 
         // Check for uncommitted changes
         const allModules = Object.values(ctx.config.resolvedModules);
+        const submoduleNames = new Set(allModules.map((m) => m.name));
         if (!options.force) {
-          // Check root repo
+          // Check root repo — ignore submodule pointer changes (they will be updated by checkout)
           const { stdout: rootStatus } = await gitInRoot(ctx.projectRoot, ['status', '--porcelain']);
-          if (rootStatus.trim().length > 0) {
+          const nonSubmoduleChanges = rootStatus
+            .split('\n')
+            .filter((line) => {
+              const path = line.substring(3).trim();
+              return path.length > 0 && !submoduleNames.has(path);
+            });
+          if (nonSubmoduleChanges.length > 0) {
             throw new VendorError(
               'Uncommitted changes in root repo. Use --force to stash.',
               name
