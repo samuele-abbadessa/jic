@@ -378,7 +378,8 @@ async function sessionStart(
     // Commit submodule pointers
     try {
       const modulePaths = Object.keys(sessionData.modules)
-        .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory ?? name);
+        .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory)
+        .filter((dir): dir is string => dir !== undefined);
       await stageSubmodulePointers(ctx.projectRoot, modulePaths);
       await commitSubmodulePointers(ctx.projectRoot, Object.keys(sessionData.modules));
     } catch {
@@ -712,7 +713,8 @@ async function mergeSessionBranches(
 
         // Update submodule pointers
         const modulePaths = Object.keys(session.modules)
-          .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory ?? name);
+          .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory)
+          .filter((dir): dir is string => dir !== undefined);
         await stageSubmodulePointers(ctx.projectRoot, modulePaths);
         await commitSubmodulePointers(ctx.projectRoot, Object.keys(session.modules));
       }

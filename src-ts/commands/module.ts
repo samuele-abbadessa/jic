@@ -1,11 +1,41 @@
 import { Command } from 'commander';
-import { readdir, access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readdir, access, stat } from 'node:fs/promises';
+import { isAbsolute, join, normalize } from 'node:path';
 import type { IExecutionContext } from '../core/context/ExecutionContext.js';
 import type { ModuleType, ModuleConfig } from '../core/types/config.js';
 import { ConfigError, withErrorHandling } from '../core/errors/index.js';
 import { saveConfig } from '../core/config/loader.js';
 import { detectModuleType } from '../core/utils/module-detector.js';
+
+/** Normalize a path to POSIX separators for config persistence & cross-platform portability. */
+function toPosixPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/**
+ * Validate a submodules directory: must be relative, must not escape projectRoot,
+ * and must exist as a directory.
+ */
+async function validateSubmodulesDir(dir: string, projectRoot: string): Promise<void> {
+  if (isAbsolute(dir)) {
+    throw new ConfigError(`Submodules path must be relative to the project root: "${dir}"`);
+  }
+  const normalized = normalize(dir);
+  const segments = normalized.split(/[\\/]/).filter((s) => s.length > 0 && s !== '.');
+  if (segments.includes('..')) {
+    throw new ConfigError(`Submodules path must stay inside the project root: "${dir}"`);
+  }
+  const abs = join(projectRoot, normalized);
+  try {
+    const st = await stat(abs);
+    if (!st.isDirectory()) {
+      throw new ConfigError(`Submodules path is not a directory: "${dir}"`);
+    }
+  } catch (e) {
+    if (e instanceof ConfigError) throw e;
+    throw new ConfigError(`Submodules path does not exist: "${dir}"`);
+  }
+}
 
 export function registerModuleCommand(
   program: Command,
@@ -19,10 +49,14 @@ export function registerModuleCommand(
   mod
     .command('discovery')
     .description('Discover modules in subdirectories and add to config')
+    .option(
+      '--path <dir>',
+      'Directory to scan for submodules, relative to project root (overrides project.submodulesDir)'
+    )
     .action(
-      withErrorHandling(async () => {
+      withErrorHandling(async (options: { path?: string }) => {
         const ctx = await createContext();
-        await moduleDiscovery(ctx);
+        await moduleDiscovery(ctx, options.path);
       })
     );
 
@@ -52,20 +86,30 @@ export function registerModuleCommand(
 // Module Discovery
 // ============================================================================
 
-async function moduleDiscovery(ctx: IExecutionContext): Promise<void> {
+async function moduleDiscovery(ctx: IExecutionContext, pathFlag?: string): Promise<void> {
   const projectRoot = ctx.projectRoot;
 
+  // Resolve submodules directory: CLI flag > project.submodulesDir > "."
+  const rawSubmodulesDir = pathFlag ?? ctx.config.project.submodulesDir ?? '.';
+  await validateSubmodulesDir(rawSubmodulesDir, projectRoot);
+  const normalizedSubmodulesDir = toPosixPath(normalize(rawSubmodulesDir));
+  const isRootScan = normalizedSubmodulesDir === '.' || normalizedSubmodulesDir === '';
+  const scanDir = isRootScan ? projectRoot : join(projectRoot, normalizedSubmodulesDir);
+
   ctx.output.header('Module Discovery');
-  ctx.output.info(`Scanning ${projectRoot}...`);
+  ctx.output.info(`Scanning ${scanDir}...`);
   ctx.output.newline();
 
-  const entries = await readdir(projectRoot, { withFileTypes: true });
-  const existingModules = new Set(
-    Object.values(ctx.config.resolvedModules).map((m) => m.originalConfig.directory)
+  const entries = await readdir(scanDir, { withFileTypes: true });
+
+  // Dedup against full directory path (relative to projectRoot, POSIX)
+  const existingDirectories = new Set(
+    Object.values(ctx.config.modules).map((m) => toPosixPath(m.directory))
   );
 
-  const discovered: Array<{ name: string; type: ModuleType }> = [];
+  const discovered: Array<{ name: string; type: ModuleType; directory: string }> = [];
   const skipped: string[] = [];
+  const collisions: string[] = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -73,43 +117,54 @@ async function moduleDiscovery(ctx: IExecutionContext): Promise<void> {
     // Skip hidden directories and known non-module directories
     if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
 
-    // Check if it has a .git directory
-    const gitDir = join(projectRoot, entry.name, '.git');
+    const moduleDirectory = isRootScan
+      ? entry.name
+      : toPosixPath(join(normalizedSubmodulesDir, entry.name));
+    const absoluteModulePath = join(projectRoot, moduleDirectory);
+
+    // Check if it has a .git entry (directory for a regular repo, file for a submodule)
+    const gitDir = join(absoluteModulePath, '.git');
     try {
       await access(gitDir);
     } catch {
-      continue; // No .git directory, skip
+      continue; // No .git, skip
     }
 
-    // Check if already in config
-    if (existingModules.has(entry.name)) {
-      skipped.push(entry.name);
+    // Check if already in config (by full directory path)
+    if (existingDirectories.has(moduleDirectory)) {
+      skipped.push(moduleDirectory);
+      continue;
+    }
+
+    // Module-name collision: a module with this basename already exists but points elsewhere
+    if (ctx.config.modules[entry.name]) {
+      collisions.push(moduleDirectory);
       continue;
     }
 
     // Detect module type
-    const dirPath = join(projectRoot, entry.name);
     try {
-      const type = await detectModuleType(dirPath);
+      const type = await detectModuleType(absoluteModulePath);
 
       // Add to config
       const moduleConfig: ModuleConfig = {
         type,
-        directory: entry.name,
+        directory: moduleDirectory,
       };
 
       ctx.config.modules[entry.name] = moduleConfig;
       ctx.config.resolvedModules[entry.name] = {
         ...moduleConfig,
         name: entry.name,
-        absolutePath: dirPath,
+        absolutePath: absoluteModulePath,
         originalConfig: moduleConfig,
         resolvedBuild: undefined,
         resolvedServe: undefined,
         resolvedDeploy: undefined,
       };
 
-      discovered.push({ name: entry.name, type });
+      discovered.push({ name: entry.name, type, directory: moduleDirectory });
+      existingDirectories.add(moduleDirectory);
     } catch (error) {
       ctx.output.warn(`  ${entry.name}: detection failed, skipping`);
       if (ctx.verbose && error instanceof Error) {
@@ -118,8 +173,19 @@ async function moduleDiscovery(ctx: IExecutionContext): Promise<void> {
     }
   }
 
+  // Persist project.submodulesDir when discovery was invoked with --path and
+  // the config does not yet specify one. This makes the choice sticky so
+  // subsequent commands (and future discovery runs) see the same layout.
+  const shouldPersistSubmodulesDir =
+    !!pathFlag &&
+    !isRootScan &&
+    ctx.config.project.submodulesDir === undefined;
+  if (shouldPersistSubmodulesDir) {
+    ctx.config.project.submodulesDir = normalizedSubmodulesDir;
+  }
+
   // Save config
-  if (discovered.length > 0) {
+  if (discovered.length > 0 || shouldPersistSubmodulesDir) {
     await saveConfig(ctx.config);
   }
 
@@ -127,7 +193,7 @@ async function moduleDiscovery(ctx: IExecutionContext): Promise<void> {
   if (discovered.length > 0) {
     ctx.output.success('Discovered modules:');
     for (const mod of discovered) {
-      ctx.output.log(`  ${mod.name.padEnd(30)} ${mod.type}`);
+      ctx.output.log(`  ${mod.name.padEnd(30)} ${mod.type.padEnd(20)} ${mod.directory}`);
     }
   } else {
     ctx.output.info('No new modules discovered.');
@@ -138,8 +204,22 @@ async function moduleDiscovery(ctx: IExecutionContext): Promise<void> {
     ctx.output.info(`Skipped (already in config): ${skipped.join(', ')}`);
   }
 
+  if (collisions.length > 0) {
+    ctx.output.newline();
+    ctx.output.warn(
+      `Skipped due to name collision (basename already used by another module): ${collisions.join(', ')}`
+    );
+  }
+
+  if (shouldPersistSubmodulesDir) {
+    ctx.output.newline();
+    ctx.output.info(`Saved project.submodulesDir = "${normalizedSubmodulesDir}"`);
+  }
+
   ctx.output.newline();
-  ctx.output.info(`Total: ${discovered.length} added, ${skipped.length} skipped`);
+  ctx.output.info(
+    `Total: ${discovered.length} added, ${skipped.length} skipped, ${collisions.length} collisions`
+  );
 }
 
 // ============================================================================

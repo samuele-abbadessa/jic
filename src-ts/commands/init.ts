@@ -20,12 +20,17 @@ export function registerInitCommand(
     .description('Initialize a new JIC project in the current directory')
     .option('--name <name>', 'Project name (default: current directory name)')
     .option('--type <type>', 'Project type: independent or submodules')
+    .option(
+      '--submodules-dir <dir>',
+      'Directory containing submodules, relative to project root (only for type "submodules")'
+    )
     .option('-f, --force', 'Overwrite existing configuration')
     .option('-y, --yes', 'Skip prompts (uses directory name + submodules type)')
     .action(
       withErrorHandling(async (options: {
         name?: string;
         type?: string;
+        submodulesDir?: string;
         force?: boolean;
         yes?: boolean;
       }) => {
@@ -40,6 +45,7 @@ async function initProject(
   options: {
     name?: string;
     type?: string;
+    submodulesDir?: string;
     force?: boolean;
     yes?: boolean;
   }
@@ -86,6 +92,23 @@ async function initProject(
     projectType = typeInput;
   }
 
+  // Validate --submodules-dir if provided
+  if (options.submodulesDir !== undefined) {
+    if (projectType !== 'submodules') {
+      throw new ConfigError(
+        '--submodules-dir is only valid for projects of type "submodules".'
+      );
+    }
+    const sd = options.submodulesDir;
+    if (sd.length === 0 || /^[/\\]/.test(sd) || /^[A-Za-z]:/.test(sd)) {
+      throw new ConfigError(`--submodules-dir must be a relative path: "${sd}"`);
+    }
+    if (sd.split(/[\\/]/).includes('..')) {
+      throw new ConfigError(`--submodules-dir must not escape the project root: "${sd}"`);
+    }
+  }
+  const submodulesDir = options.submodulesDir?.replace(/\\/g, '/');
+
   // Build config object
   const config: Record<string, unknown> = {
     version: '2.0.0',
@@ -93,6 +116,7 @@ async function initProject(
       name: projectName,
       rootDir: '.',
       ...(projectType === 'submodules' ? { type: 'submodules' } : {}),
+      ...(submodulesDir && submodulesDir !== '.' ? { submodulesDir } : {}),
     },
     modules: {},
     groups: {},

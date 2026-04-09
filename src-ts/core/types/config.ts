@@ -476,6 +476,13 @@ export interface ProjectConfig {
   rootDir: string;
   /** Project type: 'independent' (default) or 'submodules' (vendor system) */
   type?: ProjectType;
+  /**
+   * Directory containing submodules, relative to projectRoot.
+   * Used as the default scan target by `jic module discovery` when no
+   * `--path` flag is provided. Must be a relative POSIX path without `..`.
+   * Default: "." (scan projectRoot itself).
+   */
+  submodulesDir?: string;
 }
 
 // ============================================================================

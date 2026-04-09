@@ -318,8 +318,7 @@ export function registerVendorCommand(
         await saveVendorConfig(ctx.projectRoot, vendorName, configToSave);
 
         // Update submodule pointer in root
-        const modDir = mod.originalConfig.directory ?? mod.name;
-        await stageSubmodulePointers(ctx.projectRoot, [modDir]);
+        await stageSubmodulePointers(ctx.projectRoot, [mod.originalConfig.directory]);
         await commitSubmodulePointers(ctx.projectRoot, [mod.name]);
 
         ctx.output.success(`Added "${mod.name}" to vendor "${vendorName}".`);
@@ -438,7 +437,8 @@ export function registerVendorCommand(
         if (syncedModules.length > 0) {
           ctx.output.info('Updating submodule pointers in root repo...');
           const modulePaths = syncedModules
-            .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory ?? name);
+            .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory)
+            .filter((dir): dir is string => dir !== undefined);
           await stageSubmodulePointers(ctx.projectRoot, modulePaths);
           await commitSubmodulePointers(ctx.projectRoot, syncedModules);
         }
