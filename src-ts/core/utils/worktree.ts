@@ -1,0 +1,259 @@
+/**
+ * Utility per la gestione dei git worktree in JIC CLI.
+ *
+ * Risultati spike (Task 2.1, git 2.45.2):
+ * - (A) `git submodule update --init --recursive` nel worktree popola i submodule
+ *       (git li isola per-worktree in <root>/.git/worktrees/<wt>/modules/<path>).
+ * - (B) Il branch di un submodule nel worktree va creato da HEAD (commit pinnato
+ *       post-init), NON da `dev`: nel clone submodule del worktree il ref locale
+ *       del base branch NON esiste. Usa `git checkout -b <branch>` SENZA base.
+ * - (Rimozione) `git worktree remove` rifiuta SEMPRE worktree con submodule senza
+ *   --force (anche se puliti). Con --force funziona. Il check "sporco" lo fa il
+ *   chiamante; a git passiamo sempre --force.
+ */
+
+import { execa } from 'execa';
+import { join, isAbsolute, resolve } from 'path';
+import { writeFile } from 'fs/promises';
+import type { LoadedConfig } from '../config/loader.js';
+import { WorktreeError } from '../errors/index.js';
+import { createEmptyState } from '../types/state.js';
+import type { JicState } from '../types/state.js';
+
+// ============================================================================
+// Version check
+// ============================================================================
+
+/** Versione git minima per worktree+submodule affidabili (spike Task 2.1, validato su 2.45.2). */
+const MIN_GIT_VERSION: [number, number, number] = [2, 38, 0];
+
+/**
+ * Verifica che la versione di git installata supporti worktree+submodule.
+ * Lancia WorktreeError con messaggio chiaro se non soddisfatta.
+ */
+export async function assertGitWorktreeSupport(): Promise<void> {
+  let raw: string;
+  try {
+    const { stdout } = await execa('git', ['--version']);
+    raw = stdout;
+  } catch (e) {
+    throw new WorktreeError(
+      'Impossibile determinare la versione di git. Assicurati che git sia installato.',
+      undefined,
+      e instanceof Error ? e : undefined
+    );
+  }
+  const m = raw.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return; // versione non parsabile: non blocchiamo
+  const current: [number, number, number] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const ok =
+    current[0] > MIN_GIT_VERSION[0] ||
+    (current[0] === MIN_GIT_VERSION[0] &&
+      (current[1] > MIN_GIT_VERSION[1] ||
+        (current[1] === MIN_GIT_VERSION[1] && current[2] >= MIN_GIT_VERSION[2])));
+  if (!ok) {
+    throw new WorktreeError(
+      `git ${current.join('.')} non supporta in modo affidabile worktree+submodule. ` +
+        `Richiesta versione >= ${MIN_GIT_VERSION.join('.')}.`
+    );
+  }
+}
+
+// ============================================================================
+// Path resolution
+// ============================================================================
+
+/**
+ * Risolve la directory base dei worktree.
+ * config.worktree.baseDir se presente (relativa a projectRoot o assoluta),
+ * altrimenti "../<project.name>-worktrees".
+ */
+export function resolveWorktreeBaseDir(config: LoadedConfig): string {
+  const configured = config.worktree?.baseDir;
+  if (configured) {
+    return isAbsolute(configured) ? configured : resolve(config.projectRoot, configured);
+  }
+  return resolve(config.projectRoot, '..', `${config.project.name}-worktrees`);
+}
+
+/** Path assoluto del worktree di nome `name`. */
+export function resolveWorktreePath(config: LoadedConfig, name: string): string {
+  return join(resolveWorktreeBaseDir(config), name);
+}
+
+// ============================================================================
+// List worktrees
+// ============================================================================
+
+export interface WorktreeInfo {
+  /** Path assoluto del worktree */
+  path: string;
+  /** Branch checked-out (senza refs/heads/), o undefined se detached */
+  branch?: string;
+  /** SHA HEAD */
+  head?: string;
+  /** true se è il worktree principale (== projectRoot) */
+  isMain: boolean;
+}
+
+/**
+ * Elenca i worktree del repo root via `git worktree list --porcelain`.
+ * git è la source of truth (anche per worktree creati a mano).
+ */
+export async function listWorktrees(projectRoot: string): Promise<WorktreeInfo[]> {
+  const { stdout } = await execa('git', ['worktree', 'list', '--porcelain'], { cwd: projectRoot });
+  const result: WorktreeInfo[] = [];
+  let current: Partial<WorktreeInfo> = {};
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      if (current.path) {
+        result.push({ ...current, isMain: current.path === projectRoot } as WorktreeInfo);
+      }
+      current = { path: line.slice('worktree '.length).trim() };
+    } else if (line.startsWith('HEAD ')) {
+      current.head = line.slice('HEAD '.length).trim();
+    } else if (line.startsWith('branch ')) {
+      current.branch = line
+        .slice('branch '.length)
+        .trim()
+        .replace(/^refs\/heads\//, '');
+    } else if (line.trim() === '' && current.path) {
+      result.push({ ...current, isMain: current.path === projectRoot } as WorktreeInfo);
+      current = {};
+    }
+  }
+  if (current.path) {
+    result.push({ ...current, isMain: current.path === projectRoot } as WorktreeInfo);
+  }
+  return result;
+}
+
+// ============================================================================
+// Add worktree
+// ============================================================================
+
+export interface AddWorktreeOptions {
+  /** Path assoluto dove creare il worktree */
+  worktreePath: string;
+  /** Branch del root da creare (nuovo) o su cui agganciarsi (esistente) */
+  branch: string;
+  /** Branch base da cui creare `branch` (ignorato se useExistingBranch) */
+  baseBranch: string;
+  /** Se true, aggancia a un branch esistente invece di crearne uno nuovo */
+  useExistingBranch?: boolean;
+  /** Se true, NON popolare i submodule */
+  skipSubmodules?: boolean;
+  /**
+   * Branch da creare nei submodule del vendor (tipicamente == branch).
+   * Il branch è creato da HEAD (commit pinnato post-init), NON da un branch base:
+   * nel clone submodule del worktree il ref locale del base branch non esiste (spike Task 2.1).
+   * Se assente, i submodule restano al commit pinnato (detached) dopo l'init.
+   */
+  submoduleBranch?: string;
+  /** Directory (relative a projectRoot) dei submodule su cui creare il branch */
+  vendorModuleDirs?: string[];
+  /** Logger opzionale per progress */
+  onProgress?: (msg: string) => void;
+}
+
+/**
+ * Crea un worktree del repo root e (per submodules) popola i submodule.
+ * Idempotenza NON garantita: il chiamante verifica prima che il path non esista.
+ */
+export async function addWorktree(projectRoot: string, opts: AddWorktreeOptions): Promise<void> {
+  const log = opts.onProgress ?? (() => {});
+
+  // 1. Crea il worktree del root repo
+  const addArgs = opts.useExistingBranch
+    ? ['worktree', 'add', opts.worktreePath, opts.branch]
+    : ['worktree', 'add', '-b', opts.branch, opts.worktreePath, opts.baseBranch];
+  log(`Creazione worktree root: ${opts.worktreePath} (${opts.branch})`);
+  await execa('git', addArgs, { cwd: projectRoot });
+
+  if (opts.skipSubmodules) return;
+
+  // 2. Popola i submodule nel nuovo worktree
+  log('Inizializzazione submodule nel worktree...');
+  await execa('git', ['submodule', 'update', '--init', '--recursive'], { cwd: opts.worktreePath });
+
+  // 3. Allinea i branch dei submodule del vendor.
+  // Il branch è creato da HEAD (commit pinnato post-init): NON passare un base branch,
+  // perché nel clone submodule del worktree il ref locale del base non esiste (spike Task 2.1).
+  if (opts.submoduleBranch && opts.vendorModuleDirs?.length) {
+    for (const dir of opts.vendorModuleDirs) {
+      const subPath = join(opts.worktreePath, dir);
+      log(`  ${dir}: checkout -b ${opts.submoduleBranch} (da HEAD)`);
+      await execa('git', ['checkout', '-b', opts.submoduleBranch], { cwd: subPath });
+    }
+  }
+}
+
+// ============================================================================
+// Remove worktree
+// ============================================================================
+
+export interface RemoveWorktreeOptions {
+  worktreePath: string;
+  onProgress?: (msg: string) => void;
+}
+
+/**
+ * Verifica se nel worktree (root o submodule) ci sono modifiche non committate.
+ * Ritorna true se "sporco".
+ */
+export async function isWorktreeDirty(worktreePath: string): Promise<boolean> {
+  const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: worktreePath });
+  if (stdout.trim().length > 0) return true;
+  // submodule
+  const { stdout: subStatus } = await execa(
+    'git',
+    ['submodule', 'foreach', '--recursive', 'git status --porcelain'],
+    { cwd: worktreePath }
+  ).catch(() => ({ stdout: '' }));
+  // foreach stampa righe "Entering '<path>'" + eventuali porcelain: cerca righe non-Entering
+  return subStatus
+    .split('\n')
+    .some((l) => l.trim().length > 0 && !l.startsWith('Entering '));
+}
+
+/**
+ * Rimuove un worktree e ripulisce i riferimenti (root + submodule prune).
+ * Passa SEMPRE --force: git rifiuta la rimozione di worktree con submodule senza
+ * --force, anche quando puliti (spike Task 2.1). Il controllo "modifiche pendenti"
+ * è responsabilità del chiamante (isWorktreeDirty), PRIMA di invocare questa funzione.
+ * `projectRoot` deve essere la ROOT PRINCIPALE, non il worktree.
+ */
+export async function removeWorktree(
+  projectRoot: string,
+  opts: RemoveWorktreeOptions
+): Promise<void> {
+  const log = opts.onProgress ?? (() => {});
+  log(`Rimozione worktree: ${opts.worktreePath}`);
+  await execa('git', ['worktree', 'remove', '--force', opts.worktreePath], { cwd: projectRoot });
+  // prune difensivo (con --force git pulisce già le registrazioni submodule)
+  await execa('git', ['worktree', 'prune'], { cwd: projectRoot });
+  await execa('git', ['submodule', 'foreach', '--recursive', 'git worktree prune'], {
+    cwd: projectRoot,
+  }).catch(() => undefined);
+}
+
+// ============================================================================
+// Seed worktree state
+// ============================================================================
+
+/**
+ * Seeda lo stato del nuovo worktree copiando l'activeVendor dalla root corrente.
+ * Il resto (sessioni, deployment, build cache) resta isolato/vuoto per natura.
+ */
+export async function seedWorktreeState(
+  worktreePath: string,
+  activeVendor?: string
+): Promise<void> {
+  const state: JicState = createEmptyState();
+  if (activeVendor) state.activeVendor = activeVendor;
+  await writeFile(
+    join(worktreePath, 'jic.state.json'),
+    JSON.stringify(state, null, 2) + '\n',
+    'utf-8'
+  );
+}
