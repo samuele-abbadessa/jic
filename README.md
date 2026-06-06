@@ -11,6 +11,7 @@ A command-line tool for managing multi-module microservices projects. Provides u
 - **Kubernetes Management**: Namespace, deployment, and pod operations
 - **Session Management**: Track work sessions across related modules with branch management
 - **Vendor Support**: Multi-client vendor-branch workflows with git submodules
+- **Worktree Support**: Isolated git worktrees for parallel development and AI-agent workspaces
 - **Project Init**: Initialize new projects with `jic init`
 - **Module Discovery**: Auto-detect module types from filesystem
 - **Dashboard**: Terminal UI for monitoring services and logs
@@ -135,6 +136,43 @@ jic vendor add <module>                  # Add module to active vendor
 jic vendor remove <module>               # Remove module from vendor
 jic vendor sync                          # Merge master into vendor branches
 ```
+
+### Worktree Commands
+
+Git worktrees let you work in fully isolated project copies — useful for parallel development or giving each AI agent its own independent workspace. Each worktree has its own `jic.state.json` and does not interfere with other worktrees.
+
+**Requires git ≥ 2.38.**
+
+```bash
+jic worktree create <name>               # Create isolated worktree + branch + submodules
+jic worktree create <name> --branch <b>  # Use an existing branch
+jic worktree create <name> --base <b>    # Override base branch
+jic worktree create <name> --no-submodules  # Skip submodule population
+jic worktree list                        # List all worktrees
+jic worktree list --json                 # JSON output
+jic worktree remove <name>               # Remove worktree + prune + delete branches
+jic worktree remove <name> --force       # Force-remove even if dirty
+jic worktree remove <name> --keep-branch # Remove worktree but keep the branch
+jic worktree path <name>                 # Print absolute path of a worktree
+```
+
+**Session integration:**
+
+```bash
+jic session start <name> --worktree      # Create worktree and start session inside it
+jic session end <name> --worktree-remove # End session and remove the worktree
+```
+
+**Example — switch to a worktree:**
+
+```bash
+jic worktree create feat-x
+cd "$(jic worktree path feat-x)"
+# All jic commands now operate on this isolated worktree
+jic session start feat-x -m api-server frontend
+```
+
+Worktree directories are created under `worktree.baseDir` (configured in `jic.config.json`, default: `../<project-name>-worktrees`).
 
 ### Init Command
 

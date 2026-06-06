@@ -78,9 +78,45 @@ export function registerMyCommand(
 2. Export from `src-ts/commands/index.ts`
 3. Register in `src-ts/index.ts`
 
+### Worktree Support
+
+Enables parallel work in isolated git worktrees — each worktree is an independent `projectRoot` with its own `jic.state.json`. Core loader and `ExecutionContext` are untouched (Modello A: zero coupling with core).
+
+**Primary use cases:** parallel feature development, isolated AI-agent workspaces where each agent gets its own `projectRoot` and cannot interfere with others.
+
+**New files:**
+- `core/utils/worktree.ts` — `listWorktrees`, `seedWorktreeState`, `assertGitWorktreeSupport`, etc.
+- `commands/worktree.ts` — `jic worktree` command family
+
+**Worktree commands** (require git ≥ 2.38):
+
+| Command | Description |
+|---------|-------------|
+| `jic worktree create <name>` | Crea worktree isolato + branch vendor-aware + submodule popolati + seeding stato |
+| `jic worktree list` | Elenca worktree (`git worktree list` source of truth); supporta `--json` |
+| `jic worktree remove <name>` | Rimuove worktree + prune + elimina branch (root+submodule) |
+| `jic worktree path <name>` | Stampa il path assoluto del worktree |
+
+**Flags `worktree create`:** `--branch <esistente>` (usa branch esistente), `--base <branch>` (branch base), `--no-submodules` (skip populate submodule).
+
+**Session integration:**
+- `jic session start <name> --worktree` — crea worktree e avvia la sessione al suo interno
+- `jic session end <name> --worktree-remove` — chiude sessione e rimuove il worktree
+
+**Config:** `worktree.baseDir` in `jic.config.json` — directory base per i worktree (default: `../<project.name>-worktrees`, relativo a projectRoot oppure assoluto).
+
+**Requisito:** git ≥ 2.38 (verificato su 2.45.2). Check a runtime in `create` e `session start --worktree`.
+
+**Pattern per agenti AI:**
+```bash
+jic worktree create feat-x
+cd "$(jic worktree path feat-x)"
+# da questo punto tutti i comandi jic operano sul worktree isolato
+```
+
 ### Error Handling
 
-Error hierarchy in `core/errors/index.ts`: `JicError` (exit 1) → `ConfigError` (2), `BuildError` (3), `DeployError` (4), `AwsError` (5), `GitError` (6), `ServeError` (7), `SessionError` (8), `ValidationError` (9), `KubernetesError` (10), `VendorError` (11). Use `withErrorHandling()` wrapper for consistent error handling.
+Error hierarchy in `core/errors/index.ts`: `JicError` (exit 1) → `ConfigError` (2), `BuildError` (3), `DeployError` (4), `AwsError` (5), `GitError` (6), `ServeError` (7), `SessionError` (8), `ValidationError` (9), `KubernetesError` (10), `VendorError` (11), `WorktreeError` (13). Use `withErrorHandling()` wrapper for consistent error handling.
 
 ### Dashboard
 
