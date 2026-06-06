@@ -486,6 +486,22 @@ export interface ProjectConfig {
 }
 
 // ============================================================================
+// Worktree Configuration
+// ============================================================================
+
+/**
+ * Configurazione dei git worktree gestiti da `jic worktree`.
+ */
+export interface WorktreeConfig {
+  /**
+   * Directory base in cui vengono creati i worktree.
+   * Se relativa, è risolta rispetto alla projectRoot; se assoluta, usata così com'è.
+   * Default (quando assente): "../<project.name>-worktrees".
+   */
+  baseDir?: string;
+}
+
+// ============================================================================
 // Session Template Configuration
 // ============================================================================
 
@@ -546,6 +562,9 @@ export interface JicConfig {
 
   /** Docker configuration */
   docker?: DockerConfig;
+
+  /** Worktree configuration */
+  worktree?: WorktreeConfig;
 }
 
 // ============================================================================

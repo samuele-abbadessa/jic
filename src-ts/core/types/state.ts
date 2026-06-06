@@ -100,6 +100,8 @@ export interface Session {
   rootBranch?: string;
   /** Root repo base branch for this session */
   rootBaseBranch?: string;
+  /** Path assoluto del worktree in cui vive la sessione (se creata con --worktree) */
+  worktreePath?: string;
 }
 
 // ============================================================================

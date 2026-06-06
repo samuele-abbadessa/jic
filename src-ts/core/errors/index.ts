@@ -28,6 +28,7 @@ export const ExitCodes = {
   KUBERNETES_ERROR: 10,
   VENDOR_ERROR: 11,
   GITLAB_ERROR: 12,
+  WORKTREE_ERROR: 13,
   INTERRUPTED: 130,
 } as const;
 
@@ -340,6 +341,23 @@ export class GitlabError extends JicError {
     });
     this.name = 'GitlabError';
     this.moduleName = moduleName;
+  }
+}
+
+/**
+ * Worktree error
+ */
+export class WorktreeError extends JicError {
+  readonly worktreeName?: string;
+
+  constructor(message: string, worktreeName?: string, cause?: Error) {
+    super(message, {
+      exitCode: ExitCodes.WORKTREE_ERROR,
+      context: worktreeName ? { worktree: worktreeName } : undefined,
+      cause,
+    });
+    this.name = 'WorktreeError';
+    this.worktreeName = worktreeName;
   }
 }
 
