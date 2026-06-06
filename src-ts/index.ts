@@ -26,6 +26,7 @@ import {
   registerSearchCommand,
   registerKubernetesCommand,
   registerVendorCommand,
+  registerWorktreeCommand,
   registerPrCommand,
   registerInitCommand,
   registerModuleCommand,
@@ -414,6 +415,7 @@ async function main(): Promise<void> {
     registerSearchCommand(program, createCtx);
     registerKubernetesCommand(program, createCtx);
     registerVendorCommand(program, createCtx);
+    registerWorktreeCommand(program, createCtx);
     registerPrCommand(program, createCtx);
     registerModuleCommand(program, createCtx);
     registerDashboardCommand(program, createCtx);
