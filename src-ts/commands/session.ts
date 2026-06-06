@@ -16,15 +16,27 @@
  *   jic session end                          # End session
  */
 
+import { readFile, writeFile } from 'fs/promises';
+import { join, dirname } from 'path';
+import { execa } from 'execa';
 import type { Command } from 'commander';
 import type { IExecutionContext } from '../core/context/ExecutionContext.js';
 import type { ResolvedModule } from '../core/types/module.js';
 import type { Session } from '../core/types/state.js';
-import { SessionError, withErrorHandling } from '../core/errors/index.js';
+import type { JicState } from '../core/types/state.js';
+import { SessionError, WorktreeError, withErrorHandling } from '../core/errors/index.js';
 import { exec, getGitBranch, getGitStatus, getGitCommit } from '../core/utils/shell.js';
 import { colors } from '../core/utils/output.js';
 import { stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/submodule.js';
 import { createMergeRequestsForModules } from '../core/utils/gitlab.js';
+import {
+  assertGitWorktreeSupport,
+  resolveWorktreePath,
+  listWorktrees,
+  addWorktree,
+  removeWorktree,
+  seedWorktreeState,
+} from '../core/utils/worktree.js';
 
 import type { SessionTemplateConfig } from '../core/types/config.js';
 
@@ -47,6 +59,7 @@ export function registerSessionCommand(
     .option('-b, --base <branch>', 'Base branch for session')
     .option('-d, --description <desc>', 'Session description')
     .option('--no-checkout', 'Skip branch checkout')
+    .option('--worktree', 'Crea un worktree isolato e avvia la sessione al suo interno')
     .action(
       withErrorHandling(
         async (
@@ -57,9 +70,14 @@ export function registerSessionCommand(
             base?: string;
             description?: string;
             checkout?: boolean;
+            worktree?: boolean;
           }
         ) => {
           const ctx = await createContext();
+          if (options.worktree) {
+            await sessionStartInWorktree(ctx, name, options);
+            return;
+          }
           await sessionStart(ctx, name, options);
         }
       )
@@ -72,9 +90,13 @@ export function registerSessionCommand(
     .option('--merge', 'Merge session branches to base')
     .option('--delete-branches', 'Delete session branches after merge')
     .option('--pr', 'Create merge requests after merging (requires --merge)')
+    .option('--worktree-remove', 'Se la sessione vive in un worktree, rimuovilo dopo la chiusura')
     .action(
       withErrorHandling(
-        async (name: string | undefined, options: { merge?: boolean; deleteBranches?: boolean; pr?: boolean }) => {
+        async (
+          name: string | undefined,
+          options: { merge?: boolean; deleteBranches?: boolean; pr?: boolean; worktreeRemove?: boolean }
+        ) => {
           const ctx = await createContext();
           await sessionEnd(ctx, name, options);
         }
@@ -403,13 +425,86 @@ async function sessionStart(
 }
 
 // ============================================================================
+// Session Start in Worktree
+// ============================================================================
+
+async function sessionStartInWorktree(
+  ctx: IExecutionContext,
+  name: string,
+  options: { modules?: string[]; template?: string; base?: string; description?: string }
+): Promise<void> {
+  await assertGitWorktreeSupport();
+  const worktreePath = resolveWorktreePath(ctx.config, name);
+
+  const existing = await listWorktrees(ctx.projectRoot);
+  if (existing.some((w) => w.path === worktreePath)) {
+    throw new WorktreeError(`Esiste già un worktree in ${worktreePath}`, name);
+  }
+
+  const isSubmodules = ctx.isSubmodules();
+  const vendorConfig = ctx.vendorConfig;
+  let branch: string;
+  let baseBranch: string;
+  if (isSubmodules && vendorConfig) {
+    branch = `${ctx.activeVendor}/feature/${name}`;
+    baseBranch = options.base ?? vendorConfig.branches.dev;
+  } else {
+    branch = `feature/${name}`;
+    baseBranch = options.base ?? 'master';
+  }
+  const vendorModuleDirs =
+    isSubmodules && vendorConfig
+      ? Object.values(ctx.config.resolvedModules)
+          .filter((m) => vendorConfig.modules.includes(m.name))
+          .map((m) => m.originalConfig.directory)
+      : [];
+
+  ctx.output.header(`Crea worktree + sessione: ${name}`);
+  await addWorktree(ctx.projectRoot, {
+    worktreePath,
+    branch,
+    baseBranch,
+    skipSubmodules: !isSubmodules,
+    submoduleBranch: isSubmodules ? branch : undefined,
+    vendorModuleDirs,
+    onProgress: (msg) => ctx.output.log(`  ${msg}`),
+  });
+  await seedWorktreeState(worktreePath, ctx.activeVendor);
+
+  // Avvia la sessione DENTRO il worktree (jic lì opera su quella root)
+  const args = [process.argv[1], 'session', 'start', name];
+  if (options.modules?.length) args.push('-m', ...options.modules);
+  if (options.template) args.push('--template', options.template);
+  if (options.base) args.push('--base', options.base);
+  if (options.description) args.push('-d', options.description);
+
+  ctx.output.info('Avvio sessione nel worktree...');
+  await execa(process.execPath, args, { cwd: worktreePath, stdio: 'inherit' });
+
+  // Registra worktreePath nella sessione appena creata nel worktree
+  const wtStatePath = join(worktreePath, 'jic.state.json');
+  try {
+    const wtState = JSON.parse(await readFile(wtStatePath, 'utf-8')) as JicState;
+    if (wtState.sessions?.[name]) {
+      wtState.sessions[name].worktreePath = worktreePath;
+      await writeFile(wtStatePath, JSON.stringify(wtState, null, 2) + '\n', 'utf-8');
+    }
+  } catch {
+    // se la lettura/scrittura fallisce, non è bloccante
+  }
+
+  ctx.output.success(`Sessione "${name}" avviata nel worktree.`);
+  ctx.output.log(worktreePath);
+}
+
+// ============================================================================
 // Session End
 // ============================================================================
 
 async function sessionEnd(
   ctx: IExecutionContext,
   name: string | undefined,
-  options: { merge?: boolean; deleteBranches?: boolean; pr?: boolean }
+  options: { merge?: boolean; deleteBranches?: boolean; pr?: boolean; worktreeRemove?: boolean }
 ): Promise<void> {
   if (options.pr && !options.merge) {
     throw new SessionError('--pr requires --merge. Use: jic session end --merge --pr');
@@ -516,6 +611,34 @@ async function sessionEnd(
 
   ctx.output.newline();
   ctx.output.success(`Session '${sessionName}' ended`);
+
+  // Worktree handling
+  if (session.worktreePath) {
+    if (options.worktreeRemove) {
+      // session end gira DENTRO il worktree: risolvi la root principale, poi chdir + remove.
+      const { stdout: commonDir } = await execa(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: session.worktreePath }
+      );
+      const mainRoot = dirname(commonDir.trim());
+      const wtPath = session.worktreePath;
+      ctx.output.newline();
+      ctx.output.info(`Rimozione worktree: ${wtPath}`);
+      process.chdir(mainRoot);
+      await removeWorktree(mainRoot, {
+        worktreePath: wtPath,
+        onProgress: (msg) => ctx.output.log(`  ${msg}`),
+      });
+      ctx.output.success('Worktree rimosso.');
+    } else {
+      ctx.output.newline();
+      ctx.output.info(`Questa sessione vive nel worktree: ${session.worktreePath}`);
+      ctx.output.info(
+        `Per rimuoverlo: termina con --worktree-remove, oppure dalla root principale esegui "jic worktree remove ${sessionName}".`
+      );
+    }
+  }
 }
 
 // ============================================================================
