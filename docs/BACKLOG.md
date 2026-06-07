@@ -27,6 +27,21 @@ Voci di lavoro aperte per jic-cli. Le voci sono raggruppate per categoria e ordi
 | TD-1 | aperto | Pulizia errori typecheck `clean.ts` | `clean.ts` ha un import `colors` non utilizzato (TS6133 noUnusedLocals). Pre-esistente, scoperto durante implementazione worktree. | `src-ts/commands/clean.ts` | |
 | TD-2 | aperto | Pulizia errori typecheck `deploy.ts` | `deploy.ts` ha `deployFrontend` importata ma non usata (TS6133). Pre-esistente. | `src-ts/commands/deploy.ts` | |
 | TD-3 | aperto | Pulizia errori typecheck `defaults.ts` | `defaults.ts` ha `BranchConfig` importato ma non usato (TS6196). Pre-esistente. | `src-ts/core/config/defaults.ts` | |
+| TD-4 | aperto | `cleanConfig` perde campi `kubernetes` e `templates` | Il literal `cleanConfig` in `saveConfig` (~riga 446-458) non include `kubernetes` né `templates` → questi campi vengono persi a ogni `saveConfig`. Verificare se intenzionale; se no, aggiungerli. Scoperto durante implementazione `module exec`. | `src-ts/core/config/loader.ts` | |
+
+---
+
+## Module Exec
+
+Feature `jic module exec` — miglioramenti e estensioni post-implementazione.
+
+| ID | Stato | Task | Descrizione | Note | Chiuso |
+|----|-------|------|-------------|------|--------|
+| ME-1 | aperto | Output header+output in coppia con `--parallel` | Con `--parallel` (o più moduli), gli header vengono stampati in blocco e poi gli output in blocco. Migliorare stampando header+output appaiati per ciascun modulo. | `src-ts/commands/module.ts` | |
+| ME-2 | aperto | Default aliases per java/dotnet | Estendere `buildDefaultCommands` con alias di default per `java-service`/`flux-client` (es. `build`→`mvn -B package`) e `dotnet-service`. Oggi solo node/frontend. | `src-ts/commands/module.ts` | |
+| ME-3 | aperto | `--fail-fast` per `module exec` | Aggiungere flag per interrompere l'esecuzione al primo modulo fallito. Oggi il comportamento è sempre continue-on-error. | `src-ts/commands/module.ts` | |
+| ME-4 | aperto | `--dry-run` per `module exec` | Mostrare quali comandi verrebbero eseguiti su quali moduli senza eseguirli effettivamente. | `src-ts/commands/module.ts` | |
+| ME-5 | aperto | `jic module exec --list` | Elencare gli alias disponibili per i moduli target senza eseguire nulla. Utile per discovery degli alias definiti. | `src-ts/commands/module.ts` | |
 
 ---
 

@@ -189,7 +189,29 @@ jic init --force                         # Overwrite existing config
 jic module discovery                     # Scan subdirectories and add to config
 jic module config <module> get <key>     # Read config value (dot-path)
 jic module config <module> set <key> <value>  # Write config value
+jic module exec <command|@alias> [modules...] [--parallel]  # Run command/alias on modules
 ```
+
+**`jic module exec`** runs a shell command or a named alias across one or more modules. If no modules are specified, it targets the active session's modules (error if no session is active). `--parallel` runs all modules concurrently. Output includes a per-module header with stdout/stderr and a final summary (`N ok, M failed, K skipped`). Exits non-zero if at least one module fails.
+
+Use `@alias` to reference named commands defined in `jic.config.json` (per-module `commands` map or global `commands` map). A module is silently skipped if the alias is not defined for it.
+
+```bash
+# Run a literal shell command on specific modules
+jic module exec "npm ci" gwc tms
+
+# Run a named alias on a module group in parallel
+jic module exec @build @backend --parallel
+
+# Run using the active session's modules (no modules specified)
+jic module exec "npm run lint"
+```
+
+**`jic module discovery`** auto-detects module types and, for `node-service`/`frontend` modules, generates default aliases in `jic.config.json`:
+- `install-deps` → `npm install`
+- One alias per `package.json` script: `<script>` → `npm run <script>`
+
+Re-running discovery is non-destructive — existing aliases are never overwritten.
 
 ### AWS Commands
 
@@ -242,18 +264,30 @@ Configuration is stored in `jic.config.json` in the project root:
       "directory": "api-server",
       "aliases": ["api"],
       "port": 8080,
-      "dependencies": ["shared-client"]
+      "dependencies": ["shared-client"],
+      "commands": {
+        "build": "mvn -B package -DskipTests"
+      }
     },
     "frontend": {
       "type": "frontend",
       "directory": "frontend",
       "aliases": ["fe"],
-      "port": 9000
+      "port": 9000,
+      "commands": {
+        "install-deps": "npm install",
+        "build": "npm run build",
+        "lint": "npm run lint"
+      }
     }
   },
   "groups": {
     "@backend": ["api-server", "user-service"],
     "@frontend": ["frontend"]
+  },
+  "commands": {
+    "test-all": "npm test",
+    "lint": "npm run lint"
   },
   "defaults": {
     "branches": {

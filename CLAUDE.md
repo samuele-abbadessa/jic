@@ -171,6 +171,17 @@ For projects with `project.type: "submodules"`, the CLI supports vendor-branch d
 | `jic module discovery` | Scan subdirectories for git repos and add to config |
 | `jic module config <module> get <key>` | Read a module config value (dot-path) |
 | `jic module config <module> set <key> <value>` | Write a module config value |
+| `jic module exec <command\|@alias> [modules...]` | Execute a shell command or alias on the given modules |
+
+**`jic module exec` details:**
+
+- First argument is a free-form shell command (executed as-is) or an `@alias` name.
+- `@alias` resolution: per-module first (`ModuleConfig.commands`), then global (`JicConfig.commands` in `jic.config.json`); if the alias is not defined for a module, that module is **skipped with a warning** (skip is not counted as failure).
+- Target modules: if not specified, uses the active session's modules; errors if no active session.
+- `--parallel` runs all modules concurrently.
+- Output: per-module header + stdout/stderr, then summary `N ok, M failed, K skipped`; exits non-zero if at least one module fails.
+- `commands` field (`Record<string, string>`) is available both per-module and globally in `jic.config.json`, persisted on save.
+- Discovery generates default aliases for `node-service`/`frontend` modules: `install-deps`→`npm install` plus one alias per `package.json` script (`<script>`→`npm run <script>`). Re-discovery is non-destructive: existing aliases are never overwritten. No default aliases for `java-service`/`dotnet-service`.
 
 Module types: `java-service`, `flux-client`, `frontend`, `node-service`, `lambda-layer`, `lambda-functions`, `dotnet-service`, `unknown`.
 
