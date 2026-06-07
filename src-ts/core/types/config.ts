@@ -229,6 +229,8 @@ export interface ModuleConfig {
   directory: string;
   /** Short names for this module */
   aliases?: string[];
+  /** Command aliases for `jic module exec @alias` (alias -> shell command) */
+  commands?: Record<string, string>;
   /** Service port (for servable modules) */
   port?: number;
   /** Module dependencies (built before this module) */
@@ -565,6 +567,9 @@ export interface JicConfig {
 
   /** Worktree configuration */
   worktree?: WorktreeConfig;
+
+  /** Global command aliases, fallback for `jic module exec @alias` */
+  commands?: Record<string, string>;
 }
 
 // ============================================================================

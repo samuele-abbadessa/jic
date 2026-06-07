@@ -455,6 +455,7 @@ export async function saveConfig(config: LoadedConfig): Promise<void> {
     docker: config.docker,
     serve: config.serve,
     worktree: config.worktree,
+    commands: config.commands,
   };
 
   // Use original module configs (without resolved properties)
