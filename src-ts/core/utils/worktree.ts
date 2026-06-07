@@ -157,6 +157,56 @@ export interface AddWorktreeOptions {
 }
 
 /**
+ * Legge gli URL dei submodule da `.gitmodules` e, per quelli RELATIVI (`./` o `../`),
+ * costruisce override `-c submodule.<name>.url=<assoluto>` risolti contro la ROOT
+ * PRINCIPALE del repo.
+ *
+ * Necessario perché git risolve gli URL relativi dei submodule contro
+ * `remote.origin.url` del superprogetto e, in assenza di remote, contro la posizione
+ * su disco del superprogetto. In un worktree quella posizione è il path del worktree,
+ * quindi `./back` verrebbe risolto in `<worktree>/back` (inesistente) → clone fallito,
+ * e l'eventuale `submodule init` sovrascriverebbe la config CONDIVISA con quel path
+ * errato, rompendo anche il repo principale.
+ *
+ * Passando gli URL assoluti (risolti contro `projectRoot`) come override `-c`, il clone
+ * usa il submodule già presente nel repo principale, senza persistere nulla in config.
+ * Per URL assoluti (https://, git@, ...) non genera override.
+ */
+async function relativeSubmoduleUrlOverrides(projectRoot: string): Promise<string[]> {
+  let raw: string;
+  try {
+    const { stdout } = await execa(
+      'git',
+      [
+        'config',
+        '--file',
+        join(projectRoot, '.gitmodules'),
+        '--get-regexp',
+        '^submodule\\..*\\.url$',
+      ],
+      { cwd: projectRoot }
+    );
+    raw = stdout;
+  } catch {
+    // .gitmodules assente o senza URL: nessun override
+    return [];
+  }
+  const overrides: string[] = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const sp = trimmed.indexOf(' ');
+    if (sp === -1) continue;
+    const key = trimmed.slice(0, sp);
+    const url = trimmed.slice(sp + 1).trim();
+    if (url.startsWith('./') || url.startsWith('../')) {
+      overrides.push('-c', `${key}=${resolve(projectRoot, url)}`);
+    }
+  }
+  return overrides;
+}
+
+/**
  * Crea un worktree del repo root e (per submodules) popola i submodule.
  * Idempotenza NON garantita: il chiamante verifica prima che il path non esista.
  */
@@ -172,9 +222,28 @@ export async function addWorktree(projectRoot: string, opts: AddWorktreeOptions)
 
   if (opts.skipSubmodules) return;
 
-  // 2. Popola i submodule nel nuovo worktree
+  // 2. Popola i submodule nel nuovo worktree.
+  // Per i submodule con URL relativo passiamo override -c con URL assoluti risolti
+  // contro la root principale (vedi relativeSubmoduleUrlOverrides): evita che git
+  // risolva `./<sub>` contro il path del worktree (clone fallito + config condivisa corrotta).
+  // `protocol.file.allow=always` è necessario per i submodule con URL locale (path/file://):
+  // dal fix CVE-2022-39253 git blocca per default il transport `file` nei clone di submodule.
+  // Lo passiamo come override -c scoped solo a questo comando; è innocuo per URL https/ssh.
+  const urlOverrides = await relativeSubmoduleUrlOverrides(projectRoot);
   log('Inizializzazione submodule nel worktree...');
-  await execa('git', ['submodule', 'update', '--init', '--recursive'], { cwd: opts.worktreePath });
+  await execa(
+    'git',
+    [
+      '-c',
+      'protocol.file.allow=always',
+      ...urlOverrides,
+      'submodule',
+      'update',
+      '--init',
+      '--recursive',
+    ],
+    { cwd: opts.worktreePath }
+  );
 
   // 3. Allinea i branch dei submodule del vendor.
   // Il branch è creato da HEAD (commit pinnato post-init): NON passare un base branch,
