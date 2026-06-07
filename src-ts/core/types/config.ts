@@ -513,10 +513,10 @@ export interface WorktreeConfig {
 export interface SessionTemplateConfig {
   /** Template description */
   description: string;
-  /** Module groups to include */
+  /** Module groups to include (vuoto = tutti i moduli) */
   moduleGroups: string[];
-  /** Base branch for session */
-  baseBranch: string;
+  /** Base branch for session (omesso = default per-modulo) */
+  baseBranch?: string;
   /** Branch prefix for session branches */
   branchPrefix: string;
 }

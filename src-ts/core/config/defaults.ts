@@ -12,6 +12,7 @@ import type {
   ServeConfig,
   Environment,
   BranchConfig,
+  SessionTemplateConfig,
 } from '../types/config.js';
 
 // ============================================================================
@@ -185,6 +186,44 @@ export const builtInDefaults: DefaultsConfig = {
     lambda: lambdaDeployDefaults,
     'lambda-layer': lambdaDeployDefaults,
     kubernetes: kubernetesDeployDefaults,
+  },
+};
+
+// ============================================================================
+// Session Template Defaults
+// ============================================================================
+
+/**
+ * Template di sessione built-in, disponibili in ogni progetto senza doverli
+ * definire in jic.config.json. Servono a scegliere il PREFISSO del branch
+ * (`<prefix>/<nome-sessione>`); non vincolano i moduli (`moduleGroups: []` =
+ * tutti i moduli) né il base branch (omesso = default per-modulo).
+ *
+ * Sono solo i default: un progetto può ridefinire/aggiungere template in
+ * jic.config.json sotto "templates" (quelli dell'utente hanno precedenza).
+ * Per i progetti vendor/submodules il prefisso del branch è gestito dal vendor
+ * e questi prefissi non si applicano.
+ */
+export const builtInTemplates: Record<string, SessionTemplateConfig> = {
+  feature: {
+    description: 'Feature di prodotto',
+    moduleGroups: [],
+    branchPrefix: 'feature/',
+  },
+  api: {
+    description: 'Lavoro su API',
+    moduleGroups: [],
+    branchPrefix: 'api/',
+  },
+  bugfix: {
+    description: 'Correzione bug',
+    moduleGroups: [],
+    branchPrefix: 'bugfix/',
+  },
+  backend: {
+    description: 'Lavoro backend',
+    moduleGroups: [],
+    branchPrefix: 'backend/',
   },
 };
 

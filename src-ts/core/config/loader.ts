@@ -34,7 +34,7 @@ import type { JicState } from '../types/state.js';
 import { createEmptyState } from '../types/state.js';
 import type { LoadedVendorConfig } from '../types/vendor.js';
 import { ConfigError } from '../errors/index.js';
-import { builtInDefaults } from './defaults.js';
+import { builtInDefaults, builtInTemplates } from './defaults.js';
 import { deepMerge, removeUndefined } from './merger.js';
 import { loadVendorConfig } from './vendor-loader.js';
 
@@ -391,6 +391,8 @@ export async function loadConfig(options: LoadOptions = {}): Promise<LoadedConfi
   return {
     ...mainConfig,
     defaults: mergedDefaults,
+    // Template built-in disponibili ovunque; quelli del progetto hanno precedenza.
+    templates: { ...builtInTemplates, ...(mainConfig.templates ?? {}) },
     projectRoot,
     isInitialized: true,
     paths: {

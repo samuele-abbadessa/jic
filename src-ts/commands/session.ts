@@ -55,7 +55,10 @@ export function registerSessionCommand(
     .command('start <name>')
     .description('Start a new work session')
     .option('-m, --modules <modules...>', 'Modules to include')
-    .option('-t, --template <template>', 'Use session template (feature, hotfix, api, backend)')
+    .option(
+      '-t, --template <template>',
+      'Template di sessione per il prefisso del branch: feature (default), api, bugfix, backend, oltre a quelli definiti in jic.config.json. Elenco: "jic session templates"'
+    )
     .option('-b, --base <branch>', 'Base branch for session')
     .option('-d, --description <desc>', 'Session description')
     .option('--no-checkout', 'Skip branch checkout')
@@ -1306,8 +1309,8 @@ async function listTemplates(ctx: IExecutionContext): Promise<void> {
     rows.push([
       colors.primary(name),
       template.description,
-      template.moduleGroups.join(', '),
-      template.baseBranch,
+      template.moduleGroups.length > 0 ? template.moduleGroups.join(', ') : 'tutti',
+      template.baseBranch ?? 'default per-modulo',
     ]);
   }
 
