@@ -811,6 +811,25 @@ async function mergeSessionBranches(
 
       spinner.succeed(`${moduleName}: merged to ${targetBranch}`);
 
+      // Propagazione al parent (solo worktree + submodules): push del target verso
+      // origin (= mainRoot/<sub>), così i worktree fratelli/figli vedono il merge.
+      // NB: assume che il comando giri da dentro il worktree, quindi module.absolutePath
+      // è il submodule del worktree (il suo origin è mainRoot/<sub>).
+      if (ctx.isSubmodules() && session.worktreePath) {
+        const pushResult = await exec(`git push origin ${targetBranch}`, {
+          cwd: module.absolutePath,
+          silent: true,
+        });
+        if (pushResult.success) {
+          ctx.output.info(`  ${moduleName}: ${targetBranch} propagato al parent`);
+        } else {
+          const firstLine = pushResult.stderr?.split('\n').find((l) => l.trim()) ?? '';
+          ctx.output.warn(
+            `  ${moduleName}: push di ${targetBranch} verso origin fallito (merge locale ok). ${firstLine}`
+          );
+        }
+      }
+
       // Delete branch if requested
       if (deleteBranches) {
         const deleteResult = await exec(`git branch -d ${moduleSession.branch}`, {
