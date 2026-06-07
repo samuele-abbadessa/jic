@@ -18,7 +18,7 @@ import type { ResolvedModule } from '../core/types/module.js';
 import { GitError, withErrorHandling } from '../core/errors/index.js';
 import { exec, getGitBranch, getGitStatus, getGitCommit } from '../core/utils/shell.js';
 import { colors } from '../core/utils/output.js';
-import { gitInRoot, stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/submodule.js';
+import { gitInRoot } from '../core/utils/submodule.js';
 
 // ============================================================================
 // Git Command Registration
@@ -2110,29 +2110,46 @@ async function gitCommit(
     }
   }
 
+  // Commit the root repo if requested (--update-root). Oltre ai pointer dei
+  // submodule (che `git add -A` staggia automaticamente), include anche i FILE
+  // PROPRI della root (es. docs/) che altrimenti verrebbero ignorati da
+  // `jic git commit`, il quale itera solo sui submodule di sessione.
+  if (options.updateRoot && ctx.isSubmodules()) {
+    if (ctx.dryRun) {
+      ctx.output.muted('[dry-run] root: would add and commit own files + submodule pointers');
+    } else {
+      const { stdout: rootStatus } = await gitInRoot(ctx.projectRoot, ['status', '--porcelain']);
+      if (!rootStatus.trim()) {
+        ctx.output.muted('root: no changes');
+        skipped++;
+      } else {
+        const spinner = ctx.output.spinner('root: committing own files + submodule pointers');
+        spinner.start();
+        try {
+          await gitInRoot(ctx.projectRoot, ['add', '-A']);
+          const commitArgs = options.amend
+            ? ['commit', '--amend', '-m', commitMessage]
+            : ['commit', '-m', commitMessage];
+          await gitInRoot(ctx.projectRoot, commitArgs);
+          const newCommit = await getGitCommit(ctx.projectRoot);
+          spinner.succeed(`root: committed (${newCommit?.substring(0, 7) ?? 'unknown'})`);
+          committed++;
+        } catch (error) {
+          spinner.fail('root: commit failed');
+          if (ctx.verbose && error instanceof Error) {
+            ctx.output.error(`  ${error.message}`);
+          }
+          failed++;
+        }
+      }
+    }
+  }
+
   ctx.output.newline();
   ctx.output.info(`Commit complete: ${committed} committed, ${skipped} skipped, ${failed} failed`);
 
   if (committed > 0) {
     ctx.output.info('Use "jic git push" to push changes to remote');
-  }
-
-  // Update root repo submodule pointers if requested
-  if (options.updateRoot && ctx.isSubmodules() && committed > 0 && !ctx.dryRun) {
-    ctx.output.newline();
-    const spinner = ctx.output.spinner('Updating submodule pointers in root repo');
-    spinner.start();
-    try {
-      const modulePaths = modules.map((m) => m.directory);
-      await stageSubmodulePointers(ctx.projectRoot, modulePaths);
-      await commitSubmodulePointers(ctx.projectRoot, modules.map((m) => m.name));
-      spinner.succeed('Submodule pointers updated in root repo');
-    } catch (error) {
-      spinner.fail('Failed to update submodule pointers');
-      if (ctx.verbose && error instanceof Error) {
-        ctx.output.error(`  ${error.message}`);
-      }
-    }
   }
 }
 
