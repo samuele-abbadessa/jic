@@ -7,10 +7,12 @@
 
 import { Command } from 'commander';
 import { execa } from 'execa';
+import { join } from 'path';
 import type { IExecutionContext } from '../core/context/ExecutionContext.js';
 import { WorktreeError, withErrorHandling } from '../core/errors/index.js';
 import {
   assertGitWorktreeSupport,
+  getMainRepoRoot,
   resolveWorktreePath,
   listWorktrees,
   addWorktree,
@@ -39,9 +41,10 @@ export function registerWorktreeCommand(
         const ctx = await createContext();
         await assertGitWorktreeSupport();
 
-        const worktreePath = resolveWorktreePath(ctx.config, name);
+        const mainRoot = await getMainRepoRoot(ctx.projectRoot);
+        const worktreePath = resolveWorktreePath(ctx.config, name, mainRoot);
 
-        const existing = await listWorktrees(ctx.projectRoot);
+        const existing = await listWorktrees(mainRoot);
         if (existing.some((w) => w.path === worktreePath)) {
           throw new WorktreeError(`Esiste già un worktree in ${worktreePath}`, name);
         }
@@ -70,7 +73,7 @@ export function registerWorktreeCommand(
         ctx.output.keyValue('Branch', branch);
         ctx.output.keyValue('Base', baseBranch);
 
-        await addWorktree(ctx.projectRoot, {
+        await addWorktree(mainRoot, {
           worktreePath,
           branch,
           baseBranch,
@@ -95,7 +98,8 @@ export function registerWorktreeCommand(
     .action(
       withErrorHandling(async () => {
         const ctx = await createContext();
-        const worktrees = await listWorktrees(ctx.projectRoot);
+        const mainRoot = await getMainRepoRoot(ctx.projectRoot);
+        const worktrees = await listWorktrees(mainRoot);
 
         if (ctx.json) {
           ctx.output.json(worktrees);
@@ -126,9 +130,10 @@ export function registerWorktreeCommand(
     .action(
       withErrorHandling(async (name: string, options: { force?: boolean; keepBranch?: boolean }) => {
         const ctx = await createContext();
-        const worktreePath = resolveWorktreePath(ctx.config, name);
+        const mainRoot = await getMainRepoRoot(ctx.projectRoot);
+        const worktreePath = resolveWorktreePath(ctx.config, name, mainRoot);
 
-        const existing = await listWorktrees(ctx.projectRoot);
+        const existing = await listWorktrees(mainRoot);
         const target = existing.find((w) => w.path === worktreePath);
         if (!target) {
           throw new WorktreeError(`Nessun worktree trovato in ${worktreePath}`, name);
@@ -146,7 +151,7 @@ export function registerWorktreeCommand(
 
         // Il check "sporco" sopra (guardato da --force) sostituisce il --force di git,
         // che removeWorktree passa comunque sempre (richiesto dai submodule, spike Task 2.1).
-        await removeWorktree(ctx.projectRoot, {
+        await removeWorktree(mainRoot, {
           worktreePath,
           onProgress: (msg) => ctx.output.log(`  ${msg}`),
         });
@@ -155,7 +160,7 @@ export function registerWorktreeCommand(
         if (!options.keepBranch && target.branch) {
           const branch = target.branch;
           try {
-            await deleteWorktreeBranch(ctx, branch);
+            await deleteWorktreeBranch(ctx, branch, mainRoot);
             ctx.output.log(`  Branch ${branch} eliminato`);
           } catch {
             ctx.output.warn(`  Impossibile eliminare il branch ${branch} (lascialo o eliminalo a mano).`);
@@ -173,8 +178,9 @@ export function registerWorktreeCommand(
     .action(
       withErrorHandling(async (name: string) => {
         const ctx = await createContext();
-        const worktreePath = resolveWorktreePath(ctx.config, name);
-        const existing = await listWorktrees(ctx.projectRoot);
+        const mainRoot = await getMainRepoRoot(ctx.projectRoot);
+        const worktreePath = resolveWorktreePath(ctx.config, name, mainRoot);
+        const existing = await listWorktrees(mainRoot);
         if (!existing.some((w) => w.path === worktreePath)) {
           throw new WorktreeError(`Nessun worktree trovato in ${worktreePath}`, name);
         }
@@ -183,13 +189,20 @@ export function registerWorktreeCommand(
     );
 }
 
-async function deleteWorktreeBranch(ctx: IExecutionContext, branch: string): Promise<void> {
-  await execa('git', ['branch', '-D', branch], { cwd: ctx.projectRoot }).catch(() => undefined);
+async function deleteWorktreeBranch(
+  ctx: IExecutionContext,
+  branch: string,
+  mainRoot: string
+): Promise<void> {
+  // Elimina il branch nel repo principale (non in ctx.projectRoot, che potrebbe
+  // essere un worktree) e nei suoi submodule vendor, risolti contro mainRoot.
+  await execa('git', ['branch', '-D', branch], { cwd: mainRoot }).catch(() => undefined);
   if (ctx.isSubmodules() && ctx.vendorConfig) {
     const vendorConfig = ctx.vendorConfig;
     for (const mod of Object.values(ctx.config.resolvedModules)) {
       if (!vendorConfig.modules.includes(mod.name)) continue;
-      await execa('git', ['branch', '-D', branch], { cwd: mod.absolutePath }).catch(() => undefined);
+      const subPath = join(mainRoot, mod.originalConfig.directory);
+      await execa('git', ['branch', '-D', branch], { cwd: subPath }).catch(() => undefined);
     }
   }
 }

@@ -31,6 +31,7 @@ import { stageSubmodulePointers, commitSubmodulePointers } from '../core/utils/s
 import { createMergeRequestsForModules } from '../core/utils/gitlab.js';
 import {
   assertGitWorktreeSupport,
+  getMainRepoRoot,
   resolveWorktreePath,
   listWorktrees,
   addWorktree,
@@ -437,9 +438,10 @@ async function sessionStartInWorktree(
   options: { modules?: string[]; template?: string; base?: string; description?: string }
 ): Promise<void> {
   await assertGitWorktreeSupport();
-  const worktreePath = resolveWorktreePath(ctx.config, name);
+  const mainRoot = await getMainRepoRoot(ctx.projectRoot);
+  const worktreePath = resolveWorktreePath(ctx.config, name, mainRoot);
 
-  const existing = await listWorktrees(ctx.projectRoot);
+  const existing = await listWorktrees(mainRoot);
   if (existing.some((w) => w.path === worktreePath)) {
     throw new WorktreeError(`Esiste già un worktree in ${worktreePath}`, name);
   }
@@ -463,7 +465,7 @@ async function sessionStartInWorktree(
       : [];
 
   ctx.output.header(`Crea worktree + sessione: ${name}`);
-  await addWorktree(ctx.projectRoot, {
+  await addWorktree(mainRoot, {
     worktreePath,
     branch,
     baseBranch,

@@ -13,7 +13,7 @@
  */
 
 import { execa } from 'execa';
-import { join, isAbsolute, resolve } from 'path';
+import { join, isAbsolute, resolve, dirname } from 'path';
 import { writeFile } from 'fs/promises';
 import type { LoadedConfig } from '../config/loader.js';
 import { WorktreeError } from '../errors/index.js';
@@ -64,21 +64,40 @@ export async function assertGitWorktreeSupport(): Promise<void> {
 // ============================================================================
 
 /**
- * Risolve la directory base dei worktree.
- * config.worktree.baseDir se presente (relativa a projectRoot o assoluta),
- * altrimenti "../<project.name>-worktrees".
+ * Risolve la ROOT PRINCIPALE del repo a partire da una cwd qualsiasi.
+ *
+ * `git rev-parse --path-format=absolute --git-common-dir` restituisce la common
+ * git dir del repo PRINCIPALE sia eseguito dalla root sia da un worktree linkato;
+ * il suo `dirname` è la root principale. Necessario per risolvere i path dei
+ * worktree SEMPRE contro la root: altrimenti, eseguendo da dentro un worktree,
+ * `config.projectRoot` è il worktree stesso e i nuovi worktree si annidano
+ * (es. `cicero-worktrees/cicero-worktrees/<name>`).
  */
-export function resolveWorktreeBaseDir(config: LoadedConfig): string {
-  const configured = config.worktree?.baseDir;
-  if (configured) {
-    return isAbsolute(configured) ? configured : resolve(config.projectRoot, configured);
-  }
-  return resolve(config.projectRoot, '..', `${config.project.name}-worktrees`);
+export async function getMainRepoRoot(cwd: string): Promise<string> {
+  const { stdout } = await execa(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    { cwd }
+  );
+  return dirname(stdout.trim());
 }
 
-/** Path assoluto del worktree di nome `name`. */
-export function resolveWorktreePath(config: LoadedConfig, name: string): string {
-  return join(resolveWorktreeBaseDir(config), name);
+/**
+ * Risolve la directory base dei worktree.
+ * config.worktree.baseDir se presente (relativa a `mainRoot` o assoluta),
+ * altrimenti "../<project.name>-worktrees" relativa alla ROOT PRINCIPALE.
+ */
+export function resolveWorktreeBaseDir(config: LoadedConfig, mainRoot: string): string {
+  const configured = config.worktree?.baseDir;
+  if (configured) {
+    return isAbsolute(configured) ? configured : resolve(mainRoot, configured);
+  }
+  return resolve(mainRoot, '..', `${config.project.name}-worktrees`);
+}
+
+/** Path assoluto del worktree di nome `name` (risolto contro la root principale). */
+export function resolveWorktreePath(config: LoadedConfig, name: string, mainRoot: string): string {
+  return join(resolveWorktreeBaseDir(config, mainRoot), name);
 }
 
 // ============================================================================
