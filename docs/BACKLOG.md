@@ -17,6 +17,7 @@ Voci di lavoro aperte per jic-cli. Le voci sono raggruppate per categoria e ordi
 | WT-7 | aperto | Isolamento porte serve/deploy tra worktree | Worktree paralleli che eseguono `jic serve`/`deploy` possono collidere su porte o risorse condivise. Valutare offset di porta automatico per worktree. | spec §7, fuori scope feature corrente | |
 | WT-8 | aperto | Check versione git su list/remove/path | Solo `create` e `session start --worktree` chiamano `assertGitWorktreeSupport`. Spec §4.5 prevede il check per tutti i sottocomandi `jic worktree`. Decidere se estenderlo. | review finale | |
 | WT-9 | aperto | `--branch` su `session start --worktree` | `worktree create` supporta `--branch <esistente>`, ma `session start --worktree` non lo espone. Allineare le due superfici se utile. | review finale | |
+| WT-10 | aperto | Default base branch intelligente (`main` vs `master`) | Per progetti non-vendor il base branch di default è `'master'` hardcoded; un repo su `main` (es. cicero) richiede `--base main` esplicito. Rilevare il branch corrente/di default del repo principale (es. `git symbolic-ref --short HEAD` o `git rev-parse --abbrev-ref origin/HEAD`) invece di assumere `master`. Correlata a WT-4. | `commands/worktree.ts`, `commands/session.ts`; emersa testando il fix submodule URL relativi | |
 
 ---
 
