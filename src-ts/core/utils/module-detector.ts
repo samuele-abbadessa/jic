@@ -10,6 +10,23 @@ const FRONTEND_PACKAGES = [
   '@tanstack/start',
 ];
 
+/**
+ * Read npm scripts from a module's package.json.
+ * Returns an empty object if the file is missing, malformed, or has no scripts.
+ */
+export async function extractNpmScripts(
+  dirPath: string
+): Promise<Record<string, string>> {
+  const pkgPath = join(dirPath, 'package.json');
+  try {
+    const content = await readFile(pkgPath, 'utf-8');
+    const pkg = JSON.parse(content) as { scripts?: Record<string, string> };
+    return pkg.scripts ?? {};
+  } catch {
+    return {};
+  }
+}
+
 export async function detectModuleType(dirPath: string): Promise<ModuleType> {
   // 1. Check for pom.xml (Java)
   const pomType = await detectJavaType(dirPath);

@@ -5,7 +5,7 @@ import type { IExecutionContext } from '../core/context/ExecutionContext.js';
 import type { ModuleType, ModuleConfig } from '../core/types/config.js';
 import { ConfigError, withErrorHandling } from '../core/errors/index.js';
 import { saveConfig } from '../core/config/loader.js';
-import { detectModuleType } from '../core/utils/module-detector.js';
+import { detectModuleType, extractNpmScripts } from '../core/utils/module-detector.js';
 import { execInModules } from '../core/utils/shell.js';
 import type { ResolvedModule } from '../core/types/module.js';
 
@@ -101,6 +101,38 @@ export function registerModuleCommand(
 // Module Discovery
 // ============================================================================
 
+/**
+ * Build default command aliases for a freshly discovered module.
+ * - node-service / frontend: `install-deps` + one alias per package.json script.
+ * - other types: no defaults (for now).
+ */
+async function buildDefaultCommands(
+  type: ModuleType,
+  absolutePath: string
+): Promise<Record<string, string>> {
+  if (type !== 'node-service' && type !== 'frontend') {
+    return {};
+  }
+  const commands: Record<string, string> = { 'install-deps': 'npm install' };
+  const scripts = await extractNpmScripts(absolutePath);
+  for (const scriptName of Object.keys(scripts)) {
+    commands[scriptName] = `npm run ${scriptName}`;
+  }
+  return commands;
+}
+
+/**
+ * Merge default commands into an existing commands map without overwriting
+ * aliases the user already defined. Returns the merged map (or undefined if empty).
+ */
+function mergeDefaultCommands(
+  existing: Record<string, string> | undefined,
+  defaults: Record<string, string>
+): Record<string, string> | undefined {
+  const merged: Record<string, string> = { ...defaults, ...(existing ?? {}) };
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 async function moduleDiscovery(ctx: IExecutionContext, pathFlag?: string): Promise<void> {
   const projectRoot = ctx.projectRoot;
 
@@ -162,9 +194,12 @@ async function moduleDiscovery(ctx: IExecutionContext, pathFlag?: string): Promi
       const type = await detectModuleType(absoluteModulePath);
 
       // Add to config
+      const existing = ctx.config.modules[entry.name];
+      const defaultCommands = await buildDefaultCommands(type, absoluteModulePath);
       const moduleConfig: ModuleConfig = {
         type,
         directory: moduleDirectory,
+        commands: mergeDefaultCommands(existing?.commands, defaultCommands),
       };
 
       ctx.config.modules[entry.name] = moduleConfig;
