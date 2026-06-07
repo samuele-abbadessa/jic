@@ -160,13 +160,7 @@ export function registerWorktreeCommand(
 
         // Elimina il branch associato (root + submodule vendor) salvo --keep-branch
         if (!options.keepBranch && target.branch) {
-          const branch = target.branch;
-          try {
-            await deleteWorktreeBranch(ctx, branch, mainRoot);
-            ctx.output.log(`  Branch ${branch} eliminato`);
-          } catch {
-            ctx.output.warn(`  Impossibile eliminare il branch ${branch} (lascialo o eliminalo a mano).`);
-          }
+          await deleteWorktreeBranch(ctx, target.branch, mainRoot, !!options.force);
         }
 
         ctx.output.success(`Worktree "${name}" rimosso.`);
@@ -194,17 +188,26 @@ export function registerWorktreeCommand(
 async function deleteWorktreeBranch(
   ctx: IExecutionContext,
   branch: string,
-  mainRoot: string
+  mainRoot: string,
+  force: boolean
 ): Promise<void> {
-  // Elimina il branch nel repo principale (non in ctx.projectRoot, che potrebbe
-  // essere un worktree) e nei suoi submodule vendor, risolti contro mainRoot.
-  await execa('git', ['branch', '-D', branch], { cwd: mainRoot }).catch(() => undefined);
-  if (ctx.isSubmodules() && ctx.vendorConfig) {
+  const flag = force ? '-D' : '-d';
+  // Target: la root principale + i submodule (vendor → solo moduli vendor;
+  // non-vendor → tutti i submodule del progetto). I path sono risolti contro mainRoot.
+  const targets: string[] = [mainRoot];
+  if (ctx.isSubmodules()) {
     const vendorConfig = ctx.vendorConfig;
     for (const mod of Object.values(ctx.config.resolvedModules)) {
-      if (!vendorConfig.modules.includes(mod.name)) continue;
-      const subPath = join(mainRoot, mod.originalConfig.directory);
-      await execa('git', ['branch', '-D', branch], { cwd: subPath }).catch(() => undefined);
+      if (vendorConfig && !vendorConfig.modules.includes(mod.name)) continue;
+      targets.push(join(mainRoot, mod.originalConfig.directory));
+    }
+  }
+  for (const cwd of targets) {
+    const res = await execa('git', ['branch', flag, branch], { cwd, reject: false });
+    if (res.exitCode !== 0 && !force) {
+      ctx.output.warn(
+        `  ${cwd}: branch ${branch} non eliminato (commit non mergeati?). Usa --force per forzare.`
+      );
     }
   }
 }
