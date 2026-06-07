@@ -6,6 +6,8 @@ import type { ModuleType, ModuleConfig } from '../core/types/config.js';
 import { ConfigError, withErrorHandling } from '../core/errors/index.js';
 import { saveConfig } from '../core/config/loader.js';
 import { detectModuleType } from '../core/utils/module-detector.js';
+import { execInModules } from '../core/utils/shell.js';
+import type { ResolvedModule } from '../core/types/module.js';
 
 /** Normalize a path to POSIX separators for config persistence & cross-platform portability. */
 function toPosixPath(p: string): string {
@@ -79,6 +81,19 @@ export function registerModuleCommand(
           throw new ConfigError(`Unknown action "${action}". Use "get" or "set".`);
         }
       })
+    );
+
+  mod
+    .command('exec <command> [modules...]')
+    .description('Execute a shell command (or @alias) on the given modules')
+    .option('--parallel', 'Run the command on modules in parallel', false)
+    .action(
+      withErrorHandling(
+        async (command: string, moduleRefs: string[], options: { parallel?: boolean }) => {
+          const ctx = await createContext();
+          await moduleExec(ctx, command, moduleRefs, options);
+        }
+      )
     );
 }
 
@@ -264,6 +279,121 @@ async function moduleConfigSet(
 
   await saveConfig(ctx.config);
   ctx.output.success(`${mod.name}.${key} = ${JSON.stringify(value)}`);
+}
+
+// ============================================================================
+// Module Exec
+// ============================================================================
+
+/**
+ * Resolve the shell command to run for a given module.
+ * - If `command` does not start with '@', it is returned as-is (free string).
+ * - If it starts with '@', the alias is looked up in module.commands first,
+ *   then in the global config.commands. Returns null if not found anywhere.
+ */
+function resolveModuleCommand(
+  ctx: IExecutionContext,
+  module: ResolvedModule,
+  command: string
+): string | null {
+  if (!command.startsWith('@')) {
+    return command;
+  }
+  const alias = command.slice(1);
+  const perModule = module.originalConfig.commands?.[alias];
+  if (perModule !== undefined) return perModule;
+  const global = ctx.config.commands?.[alias];
+  if (global !== undefined) return global;
+  return null;
+}
+
+/**
+ * Determine target modules:
+ * - If refs are provided, resolve them normally.
+ * - If no refs: use active session modules; error if no active session.
+ */
+function resolveExecModules(
+  ctx: IExecutionContext,
+  moduleRefs: string[]
+): ResolvedModule[] {
+  if (moduleRefs.length > 0) {
+    return ctx.resolveModules(moduleRefs);
+  }
+  const sessionModules = ctx.getSessionModules();
+  if (!sessionModules || sessionModules.length === 0) {
+    throw new ConfigError(
+      'No modules specified and no active session. Specify modules: jic module exec <command> <modules...>'
+    );
+  }
+  return sessionModules;
+}
+
+async function moduleExec(
+  ctx: IExecutionContext,
+  command: string,
+  moduleRefs: string[],
+  options: { parallel?: boolean }
+): Promise<void> {
+  const modules = resolveExecModules(ctx, moduleRefs);
+
+  // Partition modules: those with a resolvable command vs skipped (alias missing)
+  const runnable: Array<{ module: ResolvedModule; cmd: string }> = [];
+  const skipped: ResolvedModule[] = [];
+  for (const module of modules) {
+    const cmd = resolveModuleCommand(ctx, module, command);
+    if (cmd === null) {
+      skipped.push(module);
+    } else {
+      runnable.push({ module, cmd });
+    }
+  }
+
+  for (const module of skipped) {
+    ctx.output.warn(
+      `${module.name}: alias "${command}" not defined (skipped)`
+    );
+  }
+
+  // Execute. execInModules takes a single command string, so when aliases
+  // resolve to different commands per module we run them grouped by command.
+  const results = new Map<string, { success: boolean }>();
+
+  if (runnable.length > 0) {
+    // Group runnable modules by resolved command to leverage execInModules.
+    const byCommand = new Map<string, ResolvedModule[]>();
+    for (const { module, cmd } of runnable) {
+      const list = byCommand.get(cmd) ?? [];
+      list.push(module);
+      byCommand.set(cmd, list);
+    }
+
+    for (const [cmd, mods] of byCommand) {
+      for (const m of mods) {
+        ctx.output.subheader(`${m.name} $ ${cmd}`);
+      }
+      const execResults = await execInModules(mods, cmd, {
+        parallel: options.parallel,
+        silent: true,
+      });
+      for (const [name, res] of execResults) {
+        if (res.stdout?.trim()) console.log(res.stdout);
+        if (res.stderr?.trim()) console.error(res.stderr);
+        results.set(name, { success: res.success });
+      }
+    }
+  }
+
+  // Summary
+  const ok = Array.from(results.values()).filter((r) => r.success).length;
+  const failed = Array.from(results.values()).filter((r) => !r.success).length;
+  const skippedCount = skipped.length;
+  ctx.output.info(
+    `Done: ${ok} ok, ${failed} failed, ${skippedCount} skipped`
+  );
+
+  if (failed > 0) {
+    process.exitCode = 1;
+  }
 }
 
 // ============================================================================
