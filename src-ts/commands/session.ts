@@ -455,14 +455,15 @@ async function sessionStartInWorktree(
     baseBranch = options.base ?? vendorConfig.branches.dev;
   } else {
     branch = `feature/${name}`;
-    baseBranch = options.base ?? 'master';
+    baseBranch = options.base ?? ctx.config.defaults.branches?.local ?? 'main';
   }
-  const vendorModuleDirs =
-    isSubmodules && vendorConfig
+  const submoduleDirs = !isSubmodules
+    ? []
+    : vendorConfig
       ? Object.values(ctx.config.resolvedModules)
           .filter((m) => vendorConfig.modules.includes(m.name))
           .map((m) => m.originalConfig.directory)
-      : [];
+      : Object.values(ctx.config.resolvedModules).map((m) => m.originalConfig.directory);
 
   ctx.output.header(`Crea worktree + sessione: ${name}`);
   await addWorktree(mainRoot, {
@@ -471,7 +472,8 @@ async function sessionStartInWorktree(
     baseBranch,
     skipSubmodules: !isSubmodules,
     submoduleBranch: isSubmodules ? branch : undefined,
-    vendorModuleDirs,
+    submoduleBaseBranch: isSubmodules ? baseBranch : undefined,
+    submoduleDirs,
     onProgress: (msg) => ctx.output.log(`  ${msg}`),
   });
   await seedWorktreeState(worktreePath, ctx.activeVendor);

@@ -162,15 +162,17 @@ export interface AddWorktreeOptions {
   useExistingBranch?: boolean;
   /** Se true, NON popolare i submodule */
   skipSubmodules?: boolean;
-  /**
-   * Branch da creare nei submodule del vendor (tipicamente == branch).
-   * Il branch è creato da HEAD (commit pinnato post-init), NON da un branch base:
-   * nel clone submodule del worktree il ref locale del base branch non esiste (spike Task 2.1).
-   * Se assente, i submodule restano al commit pinnato (detached) dopo l'init.
-   */
+  /** Branch da creare nei submodule target (tipicamente == branch). */
   submoduleBranch?: string;
-  /** Directory (relative a projectRoot) dei submodule su cui creare il branch */
-  vendorModuleDirs?: string[];
+  /**
+   * Base da cui creare il branch dei submodule. Deve esistere in mainRoot/<sub>.
+   * Modello origin-based tree: il branch nasce in mainRoot/<sub> da questo base e il
+   * worktree lo deriva da origin/<branch>. Se assente, il branch del submodule è
+   * creato da HEAD (legacy, es. useExistingBranch).
+   */
+  submoduleBaseBranch?: string;
+  /** Directory (relative a projectRoot) dei submodule target. */
+  submoduleDirs?: string[];
   /** Logger opzionale per progress */
   onProgress?: (msg: string) => void;
 }
@@ -191,6 +193,13 @@ export interface AddWorktreeOptions {
  * usa il submodule già presente nel repo principale, senza persistere nulla in config.
  * Per URL assoluti (https://, git@, ...) non genera override.
  */
+/** True se `ref` esiste nel repo in `cwd` (branch, tag o commit). */
+async function refExists(cwd: string, ref: string): Promise<boolean> {
+  return execa('git', ['rev-parse', '--verify', '--quiet', ref], { cwd })
+    .then(() => true)
+    .catch(() => false);
+}
+
 async function relativeSubmoduleUrlOverrides(projectRoot: string): Promise<string[]> {
   let raw: string;
   try {
@@ -241,13 +250,45 @@ export async function addWorktree(projectRoot: string, opts: AddWorktreeOptions)
 
   if (opts.skipSubmodules) return;
 
-  // 2. Popola i submodule nel nuovo worktree.
-  // Per i submodule con URL relativo passiamo override -c con URL assoluti risolti
-  // contro la root principale (vedi relativeSubmoduleUrlOverrides): evita che git
-  // risolva `./<sub>` contro il path del worktree (clone fallito + config condivisa corrotta).
-  // `protocol.file.allow=always` è necessario per i submodule con URL locale (path/file://):
-  // dal fix CVE-2022-39253 git blocca per default il transport `file` nei clone di submodule.
-  // Lo passiamo come override -c scoped solo a questo comando; è innocuo per URL https/ssh.
+  const dirs = opts.submoduleDirs ?? [];
+
+  // 2. Modello origin-based tree: crea il branch dei submodule in mainRoot/<sub> dal base,
+  //    PRIMA di popolare il worktree (così il clone eredita origin/<branch>).
+  if (opts.submoduleBranch && opts.submoduleBaseBranch && dirs.length) {
+    const base = opts.submoduleBaseBranch;
+    // 2a. Verifica preventiva: il base deve esistere in ogni mainRoot/<sub>
+    //     (salvo dove il branch esiste già: caso idempotente).
+    const missing: string[] = [];
+    for (const dir of dirs) {
+      const mainSub = join(projectRoot, dir);
+      if (await refExists(mainSub, `refs/heads/${opts.submoduleBranch}`)) continue;
+      if (!(await refExists(mainSub, base))) missing.push(dir);
+    }
+    if (missing.length) {
+      // cleanup-on-failure: rimuovi il worktree root appena creato, niente stati a metà
+      await execa('git', ['worktree', 'remove', '--force', opts.worktreePath], {
+        cwd: projectRoot,
+      }).catch(() => undefined);
+      await execa('git', ['worktree', 'prune'], { cwd: projectRoot }).catch(() => undefined);
+      throw new WorktreeError(
+        `Base '${base}' non trovato nei submodule: ${missing.join(', ')}. ` +
+          `Crea prima il branch base (es. il piano) prima di derivarne un worktree.`
+      );
+    }
+    // 2b. Crea il branch nel parent dal base (idempotente).
+    for (const dir of dirs) {
+      const mainSub = join(projectRoot, dir);
+      if (await refExists(mainSub, `refs/heads/${opts.submoduleBranch}`)) {
+        log(`  ${dir}: branch ${opts.submoduleBranch} già presente in root (riuso)`);
+        continue;
+      }
+      log(`  ${dir}: branch ${opts.submoduleBranch} da ${base} (in root)`);
+      await execa('git', ['branch', opts.submoduleBranch, base], { cwd: mainSub });
+    }
+  }
+
+  // 3. Popola i submodule nel worktree (clona da mainRoot/<sub>, eredita origin/*).
+  // protocol.file.allow + override URL relativi: vedi relativeSubmoduleUrlOverrides.
   const urlOverrides = await relativeSubmoduleUrlOverrides(projectRoot);
   log('Inizializzazione submodule nel worktree...');
   await execa(
@@ -264,14 +305,23 @@ export async function addWorktree(projectRoot: string, opts: AddWorktreeOptions)
     { cwd: opts.worktreePath }
   );
 
-  // 3. Allinea i branch dei submodule del vendor.
-  // Il branch è creato da HEAD (commit pinnato post-init): NON passare un base branch,
-  // perché nel clone submodule del worktree il ref locale del base non esiste (spike Task 2.1).
-  if (opts.submoduleBranch && opts.vendorModuleDirs?.length) {
-    for (const dir of opts.vendorModuleDirs) {
-      const subPath = join(opts.worktreePath, dir);
-      log(`  ${dir}: checkout -b ${opts.submoduleBranch} (da HEAD)`);
-      await execa('git', ['checkout', '-b', opts.submoduleBranch], { cwd: subPath });
+  // 4. Crea il branch dei submodule nel worktree.
+  if (opts.submoduleBranch && dirs.length) {
+    for (const dir of dirs) {
+      const wtSub = join(opts.worktreePath, dir);
+      if (opts.submoduleBaseBranch) {
+        // origin-based: il branch esiste in mainRoot/<sub> → ereditato come origin/<branch>
+        log(`  ${dir}: checkout -b ${opts.submoduleBranch} (da origin/${opts.submoduleBranch})`);
+        await execa(
+          'git',
+          ['checkout', '-b', opts.submoduleBranch, `origin/${opts.submoduleBranch}`],
+          { cwd: wtSub }
+        );
+      } else {
+        // legacy: da HEAD (commit pinnato)
+        log(`  ${dir}: checkout -b ${opts.submoduleBranch} (da HEAD)`);
+        await execa('git', ['checkout', '-b', opts.submoduleBranch], { cwd: wtSub });
+      }
     }
   }
 }

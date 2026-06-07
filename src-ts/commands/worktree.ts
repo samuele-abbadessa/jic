@@ -58,15 +58,16 @@ export function registerWorktreeCommand(
           baseBranch = options.base ?? vendorConfig.branches.dev;
         } else {
           branch = options.branch ?? `feature/${name}`;
-          baseBranch = options.base ?? 'master';
+          baseBranch = options.base ?? ctx.config.defaults.branches?.local ?? 'main';
         }
 
-        const vendorModuleDirs =
-          isSubmodules && vendorConfig
+        const submoduleDirs = !isSubmodules
+          ? []
+          : vendorConfig
             ? Object.values(ctx.config.resolvedModules)
                 .filter((m) => vendorConfig.modules.includes(m.name))
                 .map((m) => m.originalConfig.directory)
-            : [];
+            : Object.values(ctx.config.resolvedModules).map((m) => m.originalConfig.directory);
 
         ctx.output.header(`Crea worktree: ${name}`);
         ctx.output.keyValue('Path', worktreePath);
@@ -80,7 +81,8 @@ export function registerWorktreeCommand(
           useExistingBranch: !!options.branch,
           skipSubmodules: options.submodules === false || !isSubmodules,
           submoduleBranch: isSubmodules && !options.branch ? branch : undefined,
-          vendorModuleDirs,
+          submoduleBaseBranch: isSubmodules && !options.branch ? baseBranch : undefined,
+          submoduleDirs,
           onProgress: (msg) => ctx.output.log(`  ${msg}`),
         });
 
