@@ -124,7 +124,7 @@ Nei progetti `submodules`, `worktree create` (e `session start --worktree`) usa 
 
 3. **Moduli target**: in contesto non-vendor (es. progetto cicero) i submodule target sono tutti i moduli del progetto, non solo quelli vendor.
 
-4. **Propagazione del lavoro**: `jic session end --merge` in contesto worktree+submodules fa anche `git push origin <target>` per portare il lavoro nei submodule della root (rendendolo disponibile ai worktree fratelli/figli). Va eseguito da **dentro il worktree**.
+4. **Propagazione del lavoro**: `jic session end --merge` in contesto worktree+submodules fa anche `git push origin <target>` per portare il lavoro nei submodule della root (rendendolo disponibile ai worktree fratelli/figli). Va eseguito da **dentro il worktree**. Per il **repo root**, il merge verso il branch base avviene **nel worktree dove quel branch è già checked-out** (approccio b2, senza `git checkout` — evita il vincolo two-worktree che impedisce il checkout di un branch già usato altrove); per il root non serve push perché i ref sono condivisi tra i worktree linkati. Su conflitto o working tree sporco il merge viene **abortito** e viene mostrato lo **stderr git reale** (invece di un errore muto). Se il base non è checked-out in alcun worktree si usa il path legacy (checkout + merge direttamente nella root).
 
 5. **Flusso tipico plan→chunk**:
    ```bash

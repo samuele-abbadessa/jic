@@ -1,6 +1,6 @@
 # Worktree root merge propagation — merge del root chunk→piano dal worktree fratello
 
-**Status:** approvata (brainstorming)
+**Status:** implementata
 **Data:** 2026-06-08
 **Dimensione:** L
 **Spec correlata:** [`2026-06-08-worktree-submodule-branch-tree.md`](./2026-06-08-worktree-submodule-branch-tree.md) (modello origin-based tree, #1)
