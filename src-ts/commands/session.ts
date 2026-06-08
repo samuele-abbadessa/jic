@@ -37,6 +37,7 @@ import {
   addWorktree,
   removeWorktree,
   seedWorktreeState,
+  findWorktreeForBranch,
 } from '../core/utils/worktree.js';
 
 import type { SessionTemplateConfig } from '../core/types/config.js';
@@ -848,7 +849,12 @@ async function mergeSessionBranches(
     }
   }
 
-  // Root repo merge for submodules
+  // Root repo merge for submodules.
+  // Il root repo è condiviso tra i worktree linkati: il base (es. feature/<plan>)
+  // può essere checked-out solo in un worktree (l'integration). git rifiuta
+  // checkout/push/branch -f su un branch checked-out altrove, quindi il merge va
+  // eseguito NEL worktree che possiede il base (approccio b2). Se nessun worktree
+  // ha il base checked-out (sessioni non-worktree) si usa il path legacy.
   if (ctx.isSubmodules() && session.rootBranch && session.rootBaseBranch) {
     const spinner = ctx.output.spinner(`root: merging to ${session.rootBaseBranch}`);
     spinner.start();
@@ -856,19 +862,52 @@ async function mergeSessionBranches(
       if (ctx.dryRun) {
         spinner.info(`[dry-run] Would merge ${session.rootBranch} to ${session.rootBaseBranch}`);
       } else {
-        await exec(`git checkout ${session.rootBaseBranch}`, { cwd: ctx.projectRoot, silent: true });
-        await exec(`git merge ${session.rootBranch} --no-edit`, { cwd: ctx.projectRoot, silent: true });
+        const mainRoot = await getMainRepoRoot(ctx.projectRoot);
+        const baseWorktree = await findWorktreeForBranch(mainRoot, session.rootBaseBranch);
+
+        let mergeCwd: string;
+        if (baseWorktree) {
+          // b2: base checked-out in un worktree -> merge in-place lì, niente checkout.
+          mergeCwd = baseWorktree;
+        } else {
+          // Legacy: base non checked-out in alcun worktree -> checkout+merge in projectRoot.
+          mergeCwd = ctx.projectRoot;
+          const checkoutResult = await exec(`git checkout ${session.rootBaseBranch}`, {
+            cwd: mergeCwd,
+            silent: true,
+          });
+          if (!checkoutResult.success) {
+            spinner.fail('root: merge failed');
+            if (checkoutResult.stderr) ctx.output.error(`  ${checkoutResult.stderr}`);
+            return;
+          }
+        }
+
+        const mergeResult = await exec(`git merge ${session.rootBranch} --no-edit`, {
+          cwd: mergeCwd,
+          silent: true,
+        });
+        if (!mergeResult.success) {
+          // Conflitto o tree sporco: non lasciare il worktree del base in stato MERGING.
+          // abort best-effort (se non c'è merge in corso fallisce silenziosamente).
+          await exec('git merge --abort', { cwd: mergeCwd, silent: true });
+          spinner.fail('root: merge failed');
+          if (mergeResult.stderr) ctx.output.error(`  ${mergeResult.stderr}`);
+          return;
+        }
+
         spinner.succeed(`root: merged to ${session.rootBaseBranch}`);
 
-        // Update submodule pointers
+        // Commit dei pointer submodule nel worktree dove è avvenuto il merge.
         const modulePaths = Object.keys(session.modules)
           .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory)
           .filter((dir): dir is string => dir !== undefined);
-        await stageSubmodulePointers(ctx.projectRoot, modulePaths);
-        await commitSubmodulePointers(ctx.projectRoot, Object.keys(session.modules));
+        await stageSubmodulePointers(mergeCwd, modulePaths);
+        await commitSubmodulePointers(mergeCwd, Object.keys(session.modules));
       }
-    } catch {
+    } catch (error) {
       spinner.fail('root: merge failed');
+      if (error instanceof Error) ctx.output.error(`  ${error.message}`);
     }
   }
 }
