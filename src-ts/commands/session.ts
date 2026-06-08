@@ -899,11 +899,21 @@ async function mergeSessionBranches(
         spinner.succeed(`root: merged to ${session.rootBaseBranch}`);
 
         // Commit dei pointer submodule nel worktree dove è avvenuto il merge.
+        // Su un merge fast-forward non c'è nulla da committare (i pointer sono già
+        // allineati): committare comunque farebbe fallire `git commit` con "nothing
+        // to commit", facendo apparire un fuorviante "root: merge failed". Quindi si
+        // committa solo se c'è davvero qualcosa di staged.
         const modulePaths = Object.keys(session.modules)
           .map((name) => ctx.config.resolvedModules[name]?.originalConfig.directory)
           .filter((dir): dir is string => dir !== undefined);
         await stageSubmodulePointers(mergeCwd, modulePaths);
-        await commitSubmodulePointers(mergeCwd, Object.keys(session.modules));
+        // `git diff --cached --quiet` esce 0 se NON ci sono modifiche staged.
+        const nothingStaged = (
+          await exec('git diff --cached --quiet', { cwd: mergeCwd, silent: true })
+        ).success;
+        if (!nothingStaged) {
+          await commitSubmodulePointers(mergeCwd, Object.keys(session.modules));
+        }
       }
     } catch (error) {
       spinner.fail('root: merge failed');
