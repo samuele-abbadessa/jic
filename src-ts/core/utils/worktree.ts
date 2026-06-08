@@ -147,6 +147,19 @@ export async function listWorktrees(projectRoot: string): Promise<WorktreeInfo[]
   return result;
 }
 
+/**
+ * Restituisce il path assoluto del worktree che ha `branch` come HEAD checked-out,
+ * oppure null se nessun worktree linkato lo ha. Riusa listWorktrees (porcelain).
+ * `branch` è il nome nudo (senza refs/heads/), coerente con WorktreeInfo.branch.
+ */
+export async function findWorktreeForBranch(
+  mainRoot: string,
+  branch: string
+): Promise<string | null> {
+  const worktrees = await listWorktrees(mainRoot);
+  return worktrees.find((w) => w.branch === branch)?.path ?? null;
+}
+
 // ============================================================================
 // Add worktree
 // ============================================================================
