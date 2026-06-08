@@ -114,6 +114,29 @@ cd "$(jic worktree path feat-x)"
 # da questo punto tutti i comandi jic operano sul worktree isolato
 ```
 
+**Modello branch per submodule (origin-based tree):**
+
+Nei progetti `submodules`, `worktree create` (e `session start --worktree`) usa un modello ad albero:
+
+1. **Nascita del branch**: il branch viene creato nei submodule della root (`mainRoot/<sub>`) a partire dal base risolto, *prima* di popolare il worktree. Il worktree lo riceve via `origin/<branch>` (il submodule del worktree ha come origin `mainRoot/<sub>`). Questo forma l'albero: root → worktree del piano → worktree dei chunk.
+
+2. **Prerequisito per `--base feature/<plan>`**: quando si crea un chunk con `--base feature/<plan>`, quel branch deve già esistere nei submodule della root (viene creato automaticamente quando il piano è avviato con lo stesso modello). Se manca → errore chiaro + cleanup del worktree root parzialmente creato.
+
+3. **Moduli target**: in contesto non-vendor (es. progetto cicero) i submodule target sono tutti i moduli del progetto, non solo quelli vendor.
+
+4. **Propagazione del lavoro**: `jic session end --merge` in contesto worktree+submodules fa anche `git push origin <target>` per portare il lavoro nei submodule della root (rendendolo disponibile ai worktree fratelli/figli). Va eseguito da **dentro il worktree**.
+
+5. **Flusso tipico plan→chunk**:
+   ```bash
+   jic worktree create feat-plan              # crea piano (branch nasce nei sub della root)
+   cd "$(jic worktree path feat-plan)"
+   # ... sviluppo ...
+   jic session end feat-plan --merge          # merge + push verso root
+   jic worktree create feat-chunk --base feature/feat-plan  # chunk figlio
+   ```
+
+6. **`worktree create --branch <esistente>`**: NON applica il branching origin-based; i submodule restano al commit pinnato (comportamento legacy). Da usare solo con branch già esistenti.
+
 ### Error Handling
 
 Error hierarchy in `core/errors/index.ts`: `JicError` (exit 1) → `ConfigError` (2), `BuildError` (3), `DeployError` (4), `AwsError` (5), `GitError` (6), `ServeError` (7), `SessionError` (8), `ValidationError` (9), `KubernetesError` (10), `VendorError` (11), `WorktreeError` (13). Use `withErrorHandling()` wrapper for consistent error handling.

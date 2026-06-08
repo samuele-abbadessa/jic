@@ -174,6 +174,23 @@ jic session start feat-x -m api-server frontend
 
 Worktree directories are created under `worktree.baseDir` (configured in `jic.config.json`, default: `../<project-name>-worktrees`).
 
+**Submodule projects — origin-based branch tree:**
+
+For `project.type: "submodules"` projects, worktrees use an origin-based model that forms a branch tree (root → plan worktree → chunk worktrees). The branch is created in the root's submodules first (`mainRoot/<sub>`), and the new worktree derives it via `origin/<branch>`. This means:
+
+- `--base feature/<plan>` requires the plan branch to already exist in the root's submodules (created when the plan worktree was started with the same model); otherwise an error is raised and any partial state is cleaned up.
+- `jic session end --merge` (run **from inside the worktree**) pushes the merged branch back to `origin` (the root's submodule), making it available to sibling/child worktrees.
+- `worktree create --branch <existing>` skips origin-based branching; submodules stay at their pinned commit (legacy behavior).
+
+Typical plan → chunk flow:
+```bash
+jic worktree create feat-plan
+cd "$(jic worktree path feat-plan)"
+# ... develop ...
+jic session end feat-plan --merge          # merges + pushes to root submodules
+jic worktree create feat-chunk --base feature/feat-plan
+```
+
 ### Init Command
 
 ```bash

@@ -158,7 +158,7 @@ export function registerWorktreeCommand(
           onProgress: (msg) => ctx.output.log(`  ${msg}`),
         });
 
-        // Elimina il branch associato (root + submodule vendor) salvo --keep-branch
+        // Elimina il branch associato (root + submodule, vendor o non-vendor) salvo --keep-branch
         if (!options.keepBranch && target.branch) {
           await deleteWorktreeBranch(ctx, target.branch, mainRoot, !!options.force);
         }
